@@ -1,0 +1,12 @@
+datasets 
+pandas
+nltk
+
+
+# For downloading narrativeqa do:
+#
+# mkdir -p data/raw/narrativeqa_stories
+# cd data/raw/narrativeqa_stories
+# git clone https://github.com/deepmind/narrativeqa tmp_nqa
+# bash tmp_nqa/download_stories.sh
+#

@@ -3,29 +3,31 @@
 Datasets:
 - QASPER (allenai/qasper)
 - QuALITY (tasksource/QuALITY)
-- NarrativeQA manual (deepmind/narrativeqa_manual)  -> requires local stories
+- NarrativeQA manual (deepmind/narrativeqa_manual)
 
-Outputs (per dataset under --outdir/<dataset>/):
+For each dataset under --outdir/<dataset>/ this script writes:
 - docs_{train,val,test}.jsonl
 - qa_{train,val,test}.jsonl
 - docs_titleabs_{train,val,test}.jsonl  (QASPER only)
-- corpus.jsonl                          (merged unique docs with standardized fields: doc_id, text)
+- corpus.jsonl
+- eval_{train,val,test}.jsonl
+
+Usage:
+    python prep_datasets.py --datasets all --outdir data/processed
 """
 
 from __future__ import annotations
-
 import argparse
-import os
+import hashlib
+import json
 from pathlib import Path
-from typing import Tuple, List, Dict, Any
-
+from typing import Any, Dict, List, Optional, Tuple
 import pandas as pd
 from datasets import load_dataset
-import hashlib
+from bs4 import BeautifulSoup 
 
-# -----------------------
 # Helpers
-# -----------------------
+
 def ensure_dir(path: Path) -> None:
     path.mkdir(parents=True, exist_ok=True)
 
@@ -33,20 +35,28 @@ def save_jsonl(df: pd.DataFrame, path: Path) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     df.to_json(path, orient="records", lines=True, force_ascii=False)
 
+def dump_jsonl_rows(rows: List[Dict[str, Any]], path: Path) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as f:
+        for r in rows:
+            f.write(json.dumps(r, ensure_ascii=False) + "\n")
+
 def count_jsonl(path: Path) -> int:
     return sum(1 for _ in open(path, "r", encoding="utf-8"))
 
+def clean_docs(df: pd.DataFrame, id_col: str, text_col: str) -> pd.DataFrame:
+    df[text_col] = df[text_col].fillna("").astype(str).str.strip()
+    df = df[df[text_col].str.len() > 0].drop_duplicates(subset=[id_col])
+    return df
+
 def make_corpus(dataset_dir: Path, id_col: str, text_col: str) -> Path:
-    """Merge all docs_*.jsonl (excluding title+abstract files) into corpus.jsonl (doc_id, text)."""
     doc_files = sorted(dataset_dir.glob("docs_*.jsonl"))
     doc_files = [p for p in doc_files if not p.name.startswith("docs_titleabs_")]
     if not doc_files:
-        print(f"[WARN] No docs_*.jsonl (excluding titleabs) found in {dataset_dir}")
+        print(f"[WARN] No docs_*.jsonl found in {dataset_dir}")
         return dataset_dir / "corpus.jsonl"
-
     dfs = [pd.read_json(str(f), lines=True) for f in doc_files]
     df = pd.concat(dfs, ignore_index=True).drop_duplicates(subset=[id_col])
-
     out_df = df[[id_col, text_col]].rename(columns={id_col: "doc_id", text_col: "text"})
     out_path = dataset_dir / "corpus.jsonl"
     save_jsonl(out_df, out_path)
@@ -56,95 +66,108 @@ def make_corpus(dataset_dir: Path, id_col: str, text_col: str) -> Path:
 def print_counts(dataset_name: str, dataset_dir: Path) -> None:
     print(f"\n== {dataset_name.upper()} ==")
     for split in ["train", "val", "test"]:
-        d = dataset_dir / f"docs_{split}.jsonl"
-        q = dataset_dir / f"qa_{split}.jsonl"
-        if d.exists():
-            print(f"{split:>5} docs : {count_jsonl(d)}")
-        if q.exists():
-            print(f"{split:>5} qas  : {count_jsonl(q)}")
+        for kind in ["docs", "qa", "eval"]:
+            p = dataset_dir / f"{kind}_{split}.jsonl"
+            if p.exists():
+                print(f"{split:>5} {kind:5}: {count_jsonl(p)}")
 
-def clean_docs(df: pd.DataFrame, id_col: str, text_col: str) -> pd.DataFrame:
-    """Drop empty texts and de-duplicate by id_col."""
-    df[text_col] = df[text_col].fillna("").astype(str).str.strip()
-    df = df[df[text_col].str.len() > 0].drop_duplicates(subset=[id_col])
-    return df
-
-# -----------------------
 # QASPER
-# -----------------------
-def qasper_paper_text(ex: Dict[str, Any]) -> str:
-    """
-    Build a single string from ex['full_text'] (dict with 'section_name': List[str], 'paragraphs': List[List[str]]).
-    """
-    ft = ex.get("full_text") or {}
-    sec_names = ft.get("section_name", []) or []
-    paras = ft.get("paragraphs", []) or []
-
-    blocks = []
-    for i in range(max(len(sec_names), len(paras))):
-        name = sec_names[i] if i < len(sec_names) and sec_names[i] else ""
-        if name:
-            blocks.append(name)
-        if i < len(paras) and paras[i]:
-            blocks.extend([p for p in paras[i] if p])
-    return "\n\n".join(blocks).strip()
 
 def prep_qasper(base_outdir: Path) -> None:
-    print("[*] Loading QASPER (allenai/qasper)...")
-    ds = load_dataset("allenai/qasper", trust_remote_code=True)
-
+    print("[*] Loading QASPER …")
     out_dir = base_outdir / "qasper"
     ensure_dir(out_dir)
 
-    def flatten_split(split) -> Tuple[pd.DataFrame, pd.DataFrame]:
+    def qasper_paper_text(ex: Dict[str, Any]) -> str:
+        ft = ex.get("full_text") or {}
+        sec_names = ft.get("section_name", []) or []
+        paras = ft.get("paragraphs", []) or []
+        blocks = []
+        for i in range(max(len(sec_names), len(paras))):
+            name = sec_names[i] if i < len(sec_names) and sec_names[i] else ""
+            if name:
+                blocks.append(name)
+            if i < len(paras) and paras[i]:
+                blocks.extend([p for p in paras[i] if p])
+        return "\n\n".join(blocks).strip()
+
+    def dedup_keep_order(seq: List[str]) -> List[str]:
+        seen, out = set(), []
+        for s in seq:
+            if s not in seen:
+                out.append(s); seen.add(s)
+        return out
+
+    def extract_gold_strings_from_answer_obj(a: Any) -> List[str]:
+        gold: List[str] = []
+        if isinstance(a, dict):
+            s = a.get("free_form_answer")
+            if isinstance(s, str) and s.strip():
+                gold.append(s.strip())
+            yn = a.get("yes_no")
+            if isinstance(yn, bool):
+                gold.append("yes" if yn else "no")
+            spans = a.get("extractive_spans")
+            if isinstance(spans, list):
+                for sp in spans:
+                    if isinstance(sp, str) and sp.strip():
+                        gold.append(sp.strip())
+        elif isinstance(a, str) and a.strip():
+            gold.append(a.strip())
+        return gold
+
+    def extract_gold_strings_from_answers_field(ans_field: Any) -> List[str]:
+        gold: List[str] = []
+        if isinstance(ans_field, dict):
+            inner = ans_field.get("answer")
+            if isinstance(inner, list):
+                for a in inner:
+                    gold.extend(extract_gold_strings_from_answer_obj(a))
+        elif isinstance(ans_field, list):
+            for a in ans_field:
+                gold.extend(extract_gold_strings_from_answer_obj(a))
+        elif isinstance(ans_field, str) and ans_field.strip():
+            gold.append(ans_field.strip())
+        return dedup_keep_order([g for g in gold if g.strip()])
+
+    try:
+        ds = load_dataset("allenai/qasper")
+        print("[info] loaded QASPER via datasets.load_dataset")
+    except Exception as e:
+        raise RuntimeError(f"Cannot load QASPER: {e}")
+
+    def flatten_split(ex_iter) -> Tuple[pd.DataFrame, pd.DataFrame]:
         rows_docs, rows_qas = [], []
-        for ex in split:
-            pid = ex["id"]  # HF uses 'id'
+        for ex in ex_iter:
+            pid = ex.get("id")
             title = ex.get("title", "") or ""
             abstract = ex.get("abstract", "") or ""
             full_text = qasper_paper_text(ex)
-
-            rows_docs.append({
-                "paper_id": pid,
-                "title": title,
-                "abstract": abstract,
-                "document": full_text
-            })
-
-            qas = ex.get("qas", {}) or {}
-            questions = qas.get("question", []) or []
-            qids = qas.get("question_id", []) or []
-            answers_list = qas.get("answers", []) or []  # may be list[str] or list[dict]
-
-            for i in range(len(questions)):
-                q_text = questions[i]
-                q_id = qids[i] if i < len(qids) else None
-                raw_ans = answers_list[i] if i < len(answers_list) else None
-
-                # normalize answers (string or dict) to list of dicts
-                norm_answers = []
-                if isinstance(raw_ans, list):
-                    for a in raw_ans:
-                        if isinstance(a, dict):
-                            norm_answers.append(a)
-                        elif isinstance(a, str):
-                            norm_answers.append({"free_form_answer": a})
-                elif isinstance(raw_ans, dict):
-                    norm_answers.append(raw_ans)
-                elif isinstance(raw_ans, str):
-                    norm_answers.append({"free_form_answer": raw_ans})
-
-                rows_qas.append({
-                    "paper_id": pid,
-                    "question_id": q_id,
-                    "question": q_text,
-                    "answers": norm_answers,
-                })
-
-        return (
-            pd.DataFrame(rows_docs).pipe(clean_docs, id_col="paper_id", text_col="document"),
-            pd.DataFrame(rows_qas)
-        )
+            rows_docs.append({"paper_id": pid, "title": title, "abstract": abstract, "document": full_text})
+            qas = ex.get("qas") or {}
+            if isinstance(qas, dict) and isinstance(qas.get("question"), list):
+                Q = qas.get("question") or []
+                QID = qas.get("question_id") or []
+                ANS = qas.get("answers") or []
+                for i in range(len(Q)):
+                    rows_qas.append({
+                        "paper_id": pid,
+                        "question_id": QID[i] if i < len(QID) else None,
+                        "question": Q[i],
+                        "answers": ANS[i] if i < len(ANS) else None,
+                    })
+            elif isinstance(qas, list):
+                for qa in qas:
+                    if isinstance(qa, dict):
+                        rows_qas.append({
+                            "paper_id": pid,
+                            "question_id": qa.get("question_id"),
+                            "question": qa.get("question"),
+                            "answers": qa.get("answers"),
+                        })
+        docs_df = pd.DataFrame(rows_docs).pipe(clean_docs, id_col="paper_id", text_col="document")
+        qas_df = pd.DataFrame(rows_qas)
+        return docs_df, qas_df
 
     docs_tr, qas_tr = flatten_split(ds["train"])
     docs_va, qas_va = flatten_split(ds["validation"])
@@ -158,26 +181,69 @@ def prep_qasper(base_outdir: Path) -> None:
     save_jsonl(qas_va, out_dir / "qa_val.jsonl")
     save_jsonl(qas_te, out_dir / "qa_test.jsonl")
 
-    # Title + Abstract baseline (for ablations)
     for split_name, ddf in [("train", docs_tr), ("val", docs_va), ("test", docs_te)]:
         ta = ddf.assign(document=lambda d: (d["title"].fillna("") + "\n\n" + d["abstract"].fillna("")).str.strip())
         save_jsonl(ta[["paper_id", "document"]], out_dir / f"docs_titleabs_{split_name}.jsonl")
 
+    def write_eval(split_name: str, docs_df: pd.DataFrame, qas_df: pd.DataFrame) -> None:
+        df = qas_df.merge(docs_df[["paper_id", "document"]], on="paper_id", how="inner")
+        rows = []
+        for r in df.itertuples(index=False):
+            golds = extract_gold_strings_from_answers_field(r.answers)
+            if not golds:
+                continue
+            rows.append({
+                "paper_id": r.paper_id,          
+                "question_id": getattr(r, "question_id", None), 
+                "doc_text": r.document,
+                "question": r.question,
+                "gold_answers": golds,
+            })
+        dump_jsonl_rows(rows, out_dir / f"eval_{split_name}.jsonl")
+
+
+    write_eval("train", docs_tr, qas_tr)
+    write_eval("val",   docs_va, qas_va)
+    write_eval("test",  docs_te, qas_te)
+
     make_corpus(out_dir, id_col="paper_id", text_col="document")
     print_counts("qasper", out_dir)
 
-# -----------------------
 # QuALITY
-# -----------------------
-def prep_quality(base_outdir: Path) -> None:
-    print("[*] Loading QuALITY (tasksource/QuALITY)...")
-    ds = load_dataset("tasksource/QuALITY", trust_remote_code=True)
 
+def _coerce_gold_idx(label_raw, options) -> Optional[int]:
+    if label_raw is None:
+        return None
+    if isinstance(label_raw, (int, float)) or (isinstance(label_raw, str) and label_raw.strip().isdigit()):
+        i = int(label_raw)
+        if options and 1 <= i <= len(options):
+            return i - 1
+        if 0 <= i < (len(options) if options else max(i+1, 4)):
+            return i
+        return None
+    if isinstance(label_raw, str):
+        s = label_raw.strip()
+        if len(s) == 1 and "A" <= s.upper() <= "Z":
+            return ord(s.upper()) - ord("A")
+        if options:
+            try:
+                return options.index(s)
+            except ValueError:
+                return None
+    return None
+
+def _coerce_is_hard(v) -> Optional[bool]:
+    if v is None: return None
+    try:
+        return bool(int(v))
+    except Exception:
+        return bool(v)
+
+def prep_quality(base_outdir: Path) -> None:
+    print("[*] Loading QuALITY (tasksource/QuALITY)…")
+    ds = load_dataset("tasksource/QuALITY", trust_remote_code=True)
     out_dir = base_outdir / "quality"
     ensure_dir(out_dir)
-
-    available = set(ds.keys())  # e.g., {'train','validation'} or also 'test'
-    print(f"[info] QuALITY available splits: {sorted(available)}")
 
     def flatten_split(split) -> Tuple[pd.DataFrame, pd.DataFrame]:
         docs, qas = [], []
@@ -185,185 +251,165 @@ def prep_quality(base_outdir: Path) -> None:
             article_id = ex.get("article_id") or ex.get("id") or ex.get("doc_id")
             article_txt = ex.get("article") or ex.get("context") or ex.get("passage") or ""
             docs.append({"article_id": article_id, "document": article_txt})
-
-            q_text = ex.get("question") or ex.get("prompt") or ""
-            options = ex.get("options") or ex.get("choices") or []
-            qid = ex.get("qid") or ex.get("question_id")
-
-            label_raw = (
-                ex.get("label", None) if "label" in ex else
-                ex.get("gold_label", None) if "gold_label" in ex else
-                ex.get("gold_idx", None) if "gold_idx" in ex else
-                None
-            )
-
-            gold_idx = None
-            if isinstance(label_raw, int):
-                gold_idx = label_raw
-            elif isinstance(label_raw, float):
-                gold_idx = int(label_raw)
-            elif isinstance(label_raw, str):
-                s = label_raw.strip().upper()
-                if len(s) == 1 and "A" <= s <= "Z":
-                    gold_idx = ord(s) - ord("A")
-                else:
-                    try:
-                        gold_idx = options.index(label_raw)
-                    except Exception:
-                        gold_idx = None
-
+            q_text  = ex.get("question") or ex.get("prompt") or ""
+            options = ex.get("options")  or ex.get("choices") or []
+            qid     = ex.get("qid")      or ex.get("question_id")
+            label_raw = ex.get("label", ex.get("gold_label", ex.get("gold_idx", None)))
+            gold_idx = _coerce_gold_idx(label_raw, options)
+            is_hard  = _coerce_is_hard(ex.get("difficult", ex.get("is_hard", None)))
             qas.append({
                 "article_id": article_id,
                 "qid": qid,
                 "question": q_text,
                 "options": options,
                 "gold_label": gold_idx,
-                "is_hard": ex.get("is_hard", None)
+                "is_hard": is_hard,
             })
-
         return (
             pd.DataFrame(docs).pipe(clean_docs, id_col="article_id", text_col="document"),
             pd.DataFrame(qas),
         )
 
     split_plan = []
-    if "train" in available:
-        split_plan.append(("train", "train"))
-    if "validation" in available:
-        split_plan.append(("val", "validation"))
-    if "test" in available:
-        split_plan.append(("test", "test"))
+    if "train" in ds: split_plan.append(("train", "train"))
+    if "validation" in ds: split_plan.append(("val", "validation"))
+    if "test" in ds: split_plan.append(("test", "test"))
 
     for out_name, hf_name in split_plan:
         docs_df, qas_df = flatten_split(ds[hf_name])
         save_jsonl(docs_df, out_dir / f"docs_{out_name}.jsonl")
         save_jsonl(qas_df,  out_dir / f"qa_{out_name}.jsonl")
 
+        df = qas_df.merge(docs_df, on="article_id", how="inner")
+        rows = []
+        for r in df.itertuples(index=False):
+            rows.append({
+                "doc_text": r.document,
+                "question": r.question,
+                "choices": list(r.options),
+                "gold_idx": int(r.gold_label) if r.gold_label is not None else None,
+                "is_hard": bool(r.is_hard) if r.is_hard is not None else None,
+            })
+        dump_jsonl_rows(rows, out_dir / f"eval_{out_name}.jsonl")
+
     make_corpus(out_dir, id_col="article_id", text_col="document")
     print_counts("quality", out_dir)
 
-# -----------------------
-# NarrativeQA (manual)
-# -----------------------
-"""
-To download NarrativeQA stories:
-    mkdir -p data/raw/narrativeqa_stories
-    cd data/raw/narrativeqa_stories
-    git clone https://github.com/deepmind/narrativeqa tmp_nqa
-    bash tmp_nqa/download_stories.sh
-This script expects the files under: data/raw/narrativeqa_stories/tmp_nqa/tmp
-"""
+# NarrativeQA
 
 def get_narrativeqa_dir() -> Path:
     p = Path("data/raw/narrativeqa_stories/tmp_nqa/tmp")
-    if not p.exists() or not p.is_dir():
-        raise RuntimeError(
-            "NarrativeQA stories not found at data/raw/narrativeqa_stories/tmp_nqa/tmp.\n"
-            "Run download_stories.sh or adjust this path."
-        )
+    if not p.exists():
+        raise RuntimeError("NarrativeQA stories not found at data/raw/narrativeqa_stories/tmp_nqa/tmp")
     return p
 
+def _sha1(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
 def prep_narrativeqa(base_outdir: Path) -> None:
-    print("[*] Loading NarrativeQA manual (deepmind/narrativeqa_manual)...")
+    print("[*] Loading NarrativeQA manual (deepmind/narrativeqa_manual)…")
     data_dir = get_narrativeqa_dir()
-    ds = load_dataset("deepmind/narrativeqa_manual", data_dir=str(data_dir), trust_remote_code=True)
-
+    ds = load_dataset("deepmind/narrativeqa_manual", data_dir=str(data_dir))
     out_dir = base_outdir / "narrativeqa"
     ensure_dir(out_dir)
 
+    def get_doc_text(r: Dict[str, Any]) -> str:
+        doc = r.get("document")
+        text = ""
+        if isinstance(doc, str):
+            text = doc
+        elif isinstance(doc, dict):
+            text = doc.get("text") or doc.get("story_text") or doc.get("raw") or ""
+        else:
+            for k in ("story", "text"):
+                if isinstance(r.get(k), str):
+                    text = r[k]
+                    break
+        text = str(text).strip()
+        # If it looks like HTML (starts with <html> or has <body> tags), strip it.
+        if text.startswith("<") and "</" in text:
+            try:
+                text = BeautifulSoup(text, "html.parser").get_text(separator="\n")
+            except Exception:
+                pass
+        return text
+
+
+    def get_question_text(r: Dict[str, Any]) -> str:
+        q = r.get("question")
+        if isinstance(q, str): return q.strip()
+        if isinstance(q, dict):
+            return str(q.get("text") or q.get("q") or "").strip()
+        return ""
+
+    def normalize_answers(ans: Any) -> List[str]:
+        out: List[str] = []
+        if isinstance(ans, list):
+            for a in ans:
+                if isinstance(a, str) and a.strip():
+                    out.append(a.strip())
+                elif isinstance(a, dict):
+                    t = a.get("text") or a.get("answer") or a.get("a")
+                    if isinstance(t, str) and t.strip():
+                        out.append(t.strip())
+        elif isinstance(ans, dict):
+            t = ans.get("text") or ans.get("answer") or ans.get("a")
+            if isinstance(t, str) and t.strip():
+                out.append(t.strip())
+        elif isinstance(ans, str) and ans.strip():
+            out.append(ans.strip())
+        seen, uniq = set(), []
+        for s in out:
+            if s not in seen:
+                uniq.append(s); seen.add(s)
+        return uniq
+
     available = [s for s in ["train", "validation", "test"] if s in ds]
-    if not available:
-        raise RuntimeError("No splits found in narrativeqa_manual dataset.")
-
-    def sha1(s: str) -> str:
-        return hashlib.sha1(s.encode("utf-8")).hexdigest()
-
     for split in available:
-        df = pd.DataFrame(ds[split])
-        cols = set(df.columns)
-
-        # The split you have: ['answers', 'document', 'question']
-        # So we take 'document' as the text column and synthesize document_id by hashing it.
-        if "document" not in cols:
-            raise RuntimeError(
-                f"NarrativeQA: couldn't find a text column in split '{split}'. "
-                f"Columns present: {sorted(list(cols))}"
-            )
-
-        text_col = "document"
-        title_col = None  # not available
-        question_col = "question" if "question" in cols else None
-        answers_col  = "answers"  if "answers"  in cols else None
-
-        # ---- Build docs_{split}.jsonl
-        df["_document_id"] = df[text_col].astype(str).map(sha1)
-        docs_df = (
-            df[["_document_id", text_col]]
-            .drop_duplicates(subset=["_document_id"])
-            .rename(columns={"_document_id": "document_id", text_col: "document"})
-        )
-        docs_df["title"] = ""  # no titles in this layout
-        docs_df = clean_docs(docs_df, id_col="document_id", text_col="document")
-
-        # ---- Build qa_{split}.jsonl (only rows that have a question)
-        if question_col:
-            qa_rows = []
-            for r in df.itertuples(index=False):
-                rdict = r._asdict()
-                doc_text = str(rdict[text_col])
-                doc_id = sha1(doc_text)
-
-                q_text = rdict.get(question_col, None)
-                if not q_text or not str(q_text).strip():
-                    continue
-
-                # Normalize answers to a list[str]
-                ans = rdict.get(answers_col, None)
-                answers_norm = []
-                if isinstance(ans, list):
-                    answers_norm = [a for a in ans if isinstance(a, str) and a.strip()]
-                elif isinstance(ans, str):
-                    answers_norm = [ans] if ans.strip() else []
-
-                # Provide a deterministic question_id (hash of doc_id + question)
-                qid = sha1(doc_id + "\n" + str(q_text))
-
+        rows = [dict(r) for r in ds[split]]
+        doc_rows, qa_rows = [], []
+        for r in rows:
+            doc_text = get_doc_text(r)
+            if not doc_text: continue
+            doc_id = _sha1(doc_text)
+            doc_rows.append({"document_id": doc_id, "title": "", "document": doc_text})
+            q_text = get_question_text(r)
+            if q_text:
+                golds = normalize_answers(r.get("answers"))
                 qa_rows.append({
                     "document_id": doc_id,
-                    "question_id": qid,
+                    "question_id": _sha1(doc_id + q_text),
                     "question": q_text,
-                    "answers": answers_norm,
+                    "answers": golds,
                 })
-            qas_df = pd.DataFrame(qa_rows)
-        else:
-            qas_df = pd.DataFrame(columns=["document_id", "question_id", "question", "answers"])
-
+        docs_df = pd.DataFrame(doc_rows).drop_duplicates(subset=["document_id"]).pipe(clean_docs, id_col="document_id", text_col="document")
+        qas_df = pd.DataFrame(qa_rows)
         out_name = {"train": "train", "validation": "val", "test": "test"}[split]
         save_jsonl(docs_df[["document_id", "title", "document"]], out_dir / f"docs_{out_name}.jsonl")
         save_jsonl(qas_df, out_dir / f"qa_{out_name}.jsonl")
 
+        merged = qas_df.merge(docs_df[["document_id", "document"]], on="document_id", how="inner")
+        eval_rows = []
+        for r in merged.itertuples(index=False):
+            golds = [g for g in (r.answers or []) if isinstance(g, str) and g.strip()]
+            if not golds:
+                continue
+            eval_rows.append({
+                "doc_text": r.document,
+                "question": r.question,
+                "gold_answers": golds
+            })
+        dump_jsonl_rows(eval_rows, out_dir / f"eval_{out_name}.jsonl")
+
     make_corpus(out_dir, id_col="document_id", text_col="document")
     print_counts("narrativeqa", out_dir)
 
-
-# -----------------------
 # CLI
-# -----------------------
+
 def main():
     parser = argparse.ArgumentParser()
-    parser.add_argument(
-        "--datasets",
-        nargs="+",
-        default=["all"],
-        choices=["all", "qasper", "quality", "narrativeqa"],
-        help="Which datasets to prepare."
-    )
-    parser.add_argument(
-        "--outdir",
-        default="data/processed",
-        help="Base output directory."
-    )
+    parser.add_argument("--datasets", nargs="+", default=["all"], choices=["all","qasper","quality","narrativeqa"])
+    parser.add_argument("--outdir", default="data/processed")
     args = parser.parse_args()
 
     base_outdir = Path(args.outdir)
@@ -371,7 +417,7 @@ def main():
 
     todo = set(args.datasets)
     if "all" in todo:
-        todo = {"qasper", "quality", "narrativeqa"}
+        todo = {"qasper","quality","narrativeqa"}
 
     if "qasper" in todo:
         prep_qasper(base_outdir)

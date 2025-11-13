@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 from tenacity import retry, stop_after_attempt, wait_random_exponential
+from transfomers import DPRContextEncoder, DPRContextEncoderTokenizer, DPRQuestionEncoder, DPRQuestionEncoderTokenizer
 
 logging.basicConfig(format="%(asctime)s - %(message)s", level=logging.INFO)
 
@@ -35,3 +36,20 @@ class SBertEmbeddingModel(BaseEmbeddingModel):
 
     def create_embedding(self, text):
         return self.model.encode(text)
+    
+class DPREmbeddingModel(BaseEmbeddingModel):
+    def __init__(self, model_name: str = "dpr-multiset-base", is_question: bool = True):
+
+        if is_question:
+            self.encoder = DPRQuestionEncoder.from_pretrained(model_name)
+            self.tokenizer = DPRQuestionEncoderTokenizer.from_pretrained(model_name)
+        else:
+            self.encoder = DPRContextEncoder.from_pretrained(model_name)
+            self.tokenizer = DPRContextEncoderTokenizer.from_pretrained(model_name)
+      
+        self.is_question = is_question
+        
+    def create_embedding(self, text):
+        inputs = self.tokenizer(text, return_tensors="pt")
+        outputs = self.encoder(**inputs).pooler_output
+        return outputs

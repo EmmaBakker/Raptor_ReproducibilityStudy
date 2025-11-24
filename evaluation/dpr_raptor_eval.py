@@ -305,13 +305,16 @@ def baseline_dpr_context_cached(
         embs = np.array([context_embed_model.create_embedding(_norm_text(t)) for t in leaf_chunks],
                         dtype=np.float32)
         np.save(path, embs)
+    print("embs.shape::::::", embs.shape)
 
+    embs = embs.reshape(embs.shape[0], -1)
     index = faiss.IndexFlatIP(embs.shape[1])
     index.add(embs)
 
     q_vec = np.array([question_embed_model.create_embedding(_norm_text(question))], dtype=np.float32)
     # no normalization → matches repo FaissRetriever
-
+    # print("Q VEC SHAPE:::::::::::", q_vec.shape)
+    q_vec = q_vec.reshape(1, -1)
     k = min(len(leaf_chunks), 50)
     _, I = index.search(q_vec, k)
 

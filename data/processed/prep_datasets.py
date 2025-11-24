@@ -309,7 +309,7 @@ def _sha1(s: str) -> str:
 def prep_narrativeqa(base_outdir: Path) -> None:
     print("[*] Loading NarrativeQA manual (deepmind/narrativeqa_manual)…")
     data_dir = get_narrativeqa_dir()
-    ds = load_dataset("deepmind/narrativeqa_manual", data_dir=str(data_dir))
+    ds = load_dataset("deepmind/narrativeqa_manual", data_dir=str(data_dir), trust_remote_code = True)
     out_dir = base_outdir / "narrativeqa"
     ensure_dir(out_dir)
 

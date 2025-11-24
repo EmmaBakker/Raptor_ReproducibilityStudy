@@ -1,0 +1,1 @@
+{"timestamp": 1763936973, "run_name": null, "dataset": "quality", "split": "data/processed/quality/eval_val_fixed_small.jsonl", "with_raptor": false, "seed": 224, "retrieval_budget": 2000, "uqa_context_budget": 400, "tb_max_tokens": 100, "metrics": {"accuracy": 47.22222222222222, "n": 900}, "elapsed_sec": 437.95}

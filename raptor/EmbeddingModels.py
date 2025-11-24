@@ -51,5 +51,5 @@ class DPREmbeddingModel(BaseEmbeddingModel):
         
     def create_embedding(self, text):
         inputs = self.tokenizer(text, return_tensors="pt", truncation=True, max_length=512)
-        outputs = self.encoder(**inputs).pooler_output
+        outputs = self.encoder(**inputs).pooler_output.detach().numpy()
         return outputs

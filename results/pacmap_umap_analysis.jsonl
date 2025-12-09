@@ -1,0 +1,106 @@
+""" UMAP """
+{"dataset": "quality", "seed": 224,
+  "trees_root": "data/raptor_trees",
+  "tree_dir": "data/raptor_trees/quality/seed224",
+  "num_trees_analyzed": 51,
+  "cluster_and_summary_metrics": {
+    "intra_cluster_sim_mean_across_docs_mean": 0.4832102358341217,
+    "intra_cluster_sim_mean_across_docs_std": 0.047295741736888885,
+    "intra_cluster_sim_std_across_docs_mean": 0.06682318449020386,
+    "intra_cluster_sim_std_across_docs_std": 0.015220774337649345,
+    "inter_cluster_sim_mean_across_docs_mean": 0.5532618761062622,
+    "inter_cluster_sim_mean_across_docs_std": 0.06034648045897484,
+    "inter_cluster_sim_std_across_docs_mean": 0.010723594576120377,
+    "inter_cluster_sim_std_across_docs_std": 0.018700340762734413,
+    "parent_child_sim_mean_across_docs_mean": 0.5258979201316833,
+    "parent_child_sim_mean_across_docs_std": 0.056659046560525894,
+    "parent_child_sim_std_across_docs_mean": 0.1470528244972229,
+    "parent_child_sim_std_across_docs_std": 0.019709762185811996,
+    "compression_ratio_mean_across_docs_mean": 0.2219383418560028,
+    "compression_ratio_mean_across_docs_std": 0.044547442346811295,
+    "compression_ratio_std_across_docs_mean": 0.08631618320941925,
+    "compression_ratio_std_across_docs_std": 0.043992120772600174,
+    "children_tokens_mean_across_docs_mean": 535.8701171875,
+    "children_tokens_mean_across_docs_std": 91.10881805419922,
+    "summary_tokens_mean_across_docs_mean": 99.93794250488281,
+    "summary_tokens_mean_across_docs_std": 0.23025670647621155
+  },
+  "retrieval_layer_distribution": {
+    "num_questions_used": 200,
+    "total_selected_nodes": 4206,
+    "layer_distribution": {
+      "0": {
+        "count": 3404,
+        "fraction": 0.809320019020447
+      },
+      "1": {
+        "count": 759,
+        "fraction": 0.1804564907275321
+      },
+      "2": {
+        "count": 43,
+        "fraction": 0.010223490252020923
+      }
+    }
+  }
+}
+
+
+""" PACMAP """
+{"dataset": "quality", 
+"seed": 42, 
+"trees_root": "data/raptor_trees", 
+"tree_dir": "data/raptor_trees/quality/seed42", 
+"num_trees_analyzed": 50, 
+"cluster_and_summary_metrics": 
+{
+  "intra_cluster_sim_mean_across_docs_mean": 0.42402148246765137, 
+  "intra_cluster_sim_mean_across_docs_std": 0.05441757291555405, 
+  "intra_cluster_sim_std_across_docs_mean": 0.06904808431863785, 
+  "intra_cluster_sim_std_across_docs_std": 0.03028239496052265, 
+  "inter_cluster_sim_mean_across_docs_mean": 0.6387706398963928, 
+  "inter_cluster_sim_mean_across_docs_std": 0.06225807964801788, 
+  "inter_cluster_sim_std_across_docs_mean": 0.0, 
+  "inter_cluster_sim_std_across_docs_std": 0.0, 
+  "parent_child_sim_mean_across_docs_mean": 0.4412072002887726, 
+  "parent_child_sim_mean_across_docs_std": 0.07454943656921387, 
+  "parent_child_sim_std_across_docs_mean": 0.13906045258045197, 
+  "parent_child_sim_std_across_docs_std": 0.020393744111061096, 
+  "compression_ratio_mean_across_docs_mean": 0.09792259335517883, 
+  "compression_ratio_mean_across_docs_std": 0.051305536180734634, 
+  "compression_ratio_std_across_docs_mean": 0.03914444521069527, 
+  "compression_ratio_std_across_docs_std": 0.06786900013685226, 
+  "children_tokens_mean_across_docs_mean": 1313.20947265625, 
+  "children_tokens_mean_across_docs_std": 386.589599609375, 
+  "summary_tokens_mean_across_docs_mean": 99.875, 
+  "summary_tokens_mean_across_docs_std": 0.7454025745391846
+  }, 
+  "retrieval_layer_distribution": 
+  {
+    "num_questions_used": 200, 
+    "total_selected_nodes": 4254, "layer_distribution": {"0": {"count": 3839, "fraction": 0.9024447578749413}, "1": {"count": 415, "fraction": 0.09755524212505877}}}}
+
+
+  
+""" UMAP """
+{"dataset": "qasper", "seed": 224, "trees_root": "data/raptor_trees", "tree_dir": "data/raptor_trees/qasper/seed224", "num_trees_analyzed": 29, "cluster_and_summary_metrics": 
+{"intra_cluster_sim_mean_across_docs_mean": 0.5265211462974548, "intra_cluster_sim_mean_across_docs_std": 0.04349309206008911, "intra_cluster_sim_std_across_docs_mean": 0.06947258114814758, "intra_cluster_sim_std_across_docs_std": 0.016882408410310745, "inter_cluster_sim_mean_across_docs_mean": 0.5552841424942017, "inter_cluster_sim_mean_across_docs_std": 0.06971238553524017, "inter_cluster_sim_std_across_docs_mean": 0.006330015137791634, "inter_cluster_sim_std_across_docs_std": 0.01770593784749508, "parent_child_sim_mean_across_docs_mean": 0.6053795218467712, "parent_child_sim_mean_across_docs_std": 0.04260587692260742, "parent_child_sim_std_across_docs_mean": 0.1595207303762436, "parent_child_sim_std_across_docs_std": 0.0219696294516325, "compression_ratio_mean_across_docs_mean": 0.23820367455482483, "compression_ratio_mean_across_docs_std": 0.03573111444711685, "compression_ratio_std_across_docs_mean": 0.08985204249620438, "compression_ratio_std_across_docs_std": 0.03807462006807327, "children_tokens_mean_across_docs_mean": 485.7171630859375, "children_tokens_mean_across_docs_std": 62.22167205810547, "summary_tokens_mean_across_docs_mean": 99.91967010498047, "summary_tokens_mean_across_docs_std": 0.30480027198791504}, 
+"retrieval_layer_distribution": {"num_questions_used": 174, "total_selected_nodes": 3902, "layer_distribution": {
+"0": {"count": 3165, "fraction": 0.8111225012813942}, "1": {"count": 714, "fraction": 0.18298308559712967}, "2": {"count": 23, "fraction": 0.005894413121476166}}}}
+
+""" PACMAP """
+{"dataset": "qasper", "seed": 42, "trees_root": "data/raptor_trees", "tree_dir": "data/raptor_trees/qasper/seed42", "num_trees_analyzed": 29, "cluster_and_summary_metrics": {"intra_cluster_sim_mean_across_docs_mean": 0.47214871644973755, "intra_cluster_sim_mean_across_docs_std": 0.03929491341114044, "intra_cluster_sim_std_across_docs_mean": 0.0746004730463028, "intra_cluster_sim_std_across_docs_std": 0.03226878121495247, "inter_cluster_sim_mean_across_docs_mean": 0.6012206077575684, "inter_cluster_sim_mean_across_docs_std": 0.08415673673152924, "inter_cluster_sim_std_across_docs_mean": 0.0, "inter_cluster_sim_std_across_docs_std": 0.0, "parent_child_sim_mean_across_docs_mean": 0.5369298458099365, "parent_child_sim_mean_across_docs_std": 0.0606573112308979, "parent_child_sim_std_across_docs_mean": 0.15443800389766693, "parent_child_sim_std_across_docs_std": 0.027435217052698135, "compression_ratio_mean_across_docs_mean": 0.15633119642734528, "compression_ratio_mean_across_docs_std": 0.11530469357967377, "compression_ratio_std_across_docs_mean": 0.10181274265050888, "compression_ratio_std_across_docs_std": 0.1735631376504898, "children_tokens_mean_across_docs_mean": 1014.96533203125, "children_tokens_mean_across_docs_std": 338.8445129394531, "summary_tokens_mean_across_docs_mean": 99.70689392089844, "summary_tokens_mean_across_docs_std": 0.9309545755386353}, "retrieval_layer_distribution": {"num_questions_used": 174, "total_selected_nodes": 3929, "layer_distribution": {"0": {"count": 3506, "fraction": 0.8923390175617205}, "1": {"count": 423, "fraction": 0.10766098243827946}}}}
+
+
+
+""" UMAP """
+{"dataset": "narrativeqa", "seed": 224, "trees_root": "data/raptor_trees", "tree_dir": "data/raptor_trees/narrativeqa/seed224", "num_trees_analyzed": 50, "cluster_and_summary_metrics": {"intra_cluster_sim_mean_across_docs_mean": 0.5419424772262573, "intra_cluster_sim_mean_across_docs_std": 0.027500171214342117, "intra_cluster_sim_std_across_docs_mean": 0.0776045024394989, "intra_cluster_sim_std_across_docs_std": 0.010286619886755943, "inter_cluster_sim_mean_across_docs_mean": 0.5010194182395935, "inter_cluster_sim_mean_across_docs_std": 0.08560773730278015, "inter_cluster_sim_std_across_docs_mean": 0.04696041718125343, "inter_cluster_sim_std_across_docs_std": 0.02286190539598465, "parent_child_sim_mean_across_docs_mean": 0.5733065605163574, "parent_child_sim_mean_across_docs_std": 0.03605896234512329, "parent_child_sim_std_across_docs_mean": 0.1497739553451538, "parent_child_sim_std_across_docs_std": 0.010927185416221619, "compression_ratio_mean_across_docs_mean": 0.21912045776844025, "compression_ratio_mean_across_docs_std": 0.02320614643394947, "compression_ratio_std_across_docs_mean": 0.1118600144982338, "compression_ratio_std_across_docs_std": 0.02394327148795128, "children_tokens_mean_across_docs_mean": 564.7637329101562, "children_tokens_mean_across_docs_std": 84.26329040527344, "summary_tokens_mean_across_docs_mean": 99.9132308959961, "summary_tokens_mean_across_docs_std": 0.1545143574476242}, "retrieval_layer_distribution": {"num_questions_used": 200, "total_selected_nodes": 4051, "layer_distribution": {"0": {"count": 2874, "fraction": 0.7094544556899531}, "1": {"count": 948, "fraction": 0.2340162922735127}, "2": {"count": 192, "fraction": 0.04739570476425574}, "3": {"count": 37, "fraction": 0.00913354727227845}}}}
+""" PACMAP """
+{"dataset": "narrativeqa", "seed": 42, "trees_root": "data/raptor_trees", "tree_dir": "data/raptor_trees/narrativeqa/seed42", "num_trees_analyzed": 50, "cluster_and_summary_metrics": {"intra_cluster_sim_mean_across_docs_mean": 0.47914209961891174, "intra_cluster_sim_mean_across_docs_std": 0.03388414904475212, "intra_cluster_sim_std_across_docs_mean": 0.0850670263171196, "intra_cluster_sim_std_across_docs_std": 0.0165035892277956, "inter_cluster_sim_mean_across_docs_mean": 0.5567939281463623, "inter_cluster_sim_mean_across_docs_std": 0.11236125230789185, "inter_cluster_sim_std_across_docs_mean": 0.05059843137860298, "inter_cluster_sim_std_across_docs_std": 0.04258401319384575, "parent_child_sim_mean_across_docs_mean": 0.4707961678504944, "parent_child_sim_mean_across_docs_std": 0.03638729080557823, "parent_child_sim_std_across_docs_mean": 0.15287275612354279, "parent_child_sim_std_across_docs_std": 0.01690792478621006, "compression_ratio_mean_across_docs_mean": 0.08787326514720917, "compression_ratio_mean_across_docs_std": 0.028689242899417877, "compression_ratio_std_across_docs_mean": 0.07421759516000748, "compression_ratio_std_across_docs_std": 0.07263124734163284, "children_tokens_mean_across_docs_mean": 1606.4002685546875, "children_tokens_mean_across_docs_std": 212.2910614013672, "summary_tokens_mean_across_docs_mean": 99.9570541381836, "summary_tokens_mean_across_docs_std": 0.21556268632411957}, "retrieval_layer_distribution": {"num_questions_used": 200, "total_selected_nodes": 4089, "layer_distribution": {"0": {"count": 3556, "fraction": 0.8696502812423575}, "1": {"count": 480, "fraction": 0.11738811445341159}, "2": {"count": 53, "fraction": 0.012961604304230863}}}}
+
+
+
+""" TRIMAP """
+{"dataset": "qasper", "seed": 99, "trees_root": "data/raptor_trees", "tree_dir": "data/raptor_trees/qasper/seed99_trimap", "dr_method": "trimap", "num_trees_analyzed": 29, "cluster_and_summary_metrics": {"intra_cluster_sim_mean_across_docs_mean": 0.424238920211792, "intra_cluster_sim_mean_across_docs_std": 0.05386052653193474, "intra_cluster_sim_std_across_docs_mean": 0.04584026709198952, "intra_cluster_sim_std_across_docs_std": 0.045980632305145264, "inter_cluster_sim_mean_across_docs_mean": 0.6629782915115356, "inter_cluster_sim_mean_across_docs_std": 0.08768557757139206, "inter_cluster_sim_std_across_docs_mean": 0.0, "inter_cluster_sim_std_across_docs_std": 0.0, "parent_child_sim_mean_across_docs_mean": 0.4726135730743408, "parent_child_sim_mean_across_docs_std": 0.05928163230419159, "parent_child_sim_std_across_docs_mean": 0.15717563033103943, "parent_child_sim_std_across_docs_std": 0.02617328241467476, "compression_ratio_mean_across_docs_mean": 0.06154409423470497, "compression_ratio_mean_across_docs_std": 0.01740894466638565, "compression_ratio_std_across_docs_mean": 0.01272367313504219, "compression_ratio_std_across_docs_std": 0.014599516987800598, "children_tokens_mean_across_docs_mean": 1876.9195556640625, "children_tokens_mean_across_docs_std": 528.9212646484375, "summary_tokens_mean_across_docs_mean": 100.0, "summary_tokens_mean_across_docs_std": 0.0}, "retrieval_layer_distribution": {"num_questions_used": 174, "total_selected_nodes": 3930, "layer_distribution": {"0": {"count": 3695, "fraction": 0.9402035623409669}, "1": {"count": 235, "fraction": 0.05979643765903308}}}}
+{"dataset": "quality", "seed": 99, "trees_root": "data/raptor_trees", "tree_dir": "data/raptor_trees/quality/seed99_trimap", "dr_method": "trimap", "num_trees_analyzed": 50, "cluster_and_summary_metrics": {"intra_cluster_sim_mean_across_docs_mean": 0.40000060200691223, "intra_cluster_sim_mean_across_docs_std": 0.05372389405965805, "intra_cluster_sim_std_across_docs_mean": 0.04909973219037056, "intra_cluster_sim_std_across_docs_std": 0.03474949300289154, "inter_cluster_sim_mean_across_docs_mean": 0.6894027590751648, "inter_cluster_sim_mean_across_docs_std": 0.0740133672952652, "inter_cluster_sim_std_across_docs_mean": 0.0, "inter_cluster_sim_std_across_docs_std": 0.0, "parent_child_sim_mean_across_docs_mean": 0.3926266133785248, "parent_child_sim_mean_across_docs_std": 0.06694668531417847, "parent_child_sim_std_across_docs_mean": 0.13885632157325745, "parent_child_sim_std_across_docs_std": 0.020995624363422394, "compression_ratio_mean_across_docs_mean": 0.05300678685307503, "compression_ratio_mean_across_docs_std": 0.015583299100399017, "compression_ratio_std_across_docs_mean": 0.013251307420432568, "compression_ratio_std_across_docs_std": 0.013251841999590397, "children_tokens_mean_across_docs_mean": 2159.4833984375, "children_tokens_mean_across_docs_std": 487.7037353515625, "summary_tokens_mean_across_docs_mean": 100.00499725341797, "summary_tokens_mean_across_docs_std": 0.03500000014901161}, "retrieval_layer_distribution": {"num_questions_used": 200, "total_selected_nodes": 4271, "layer_distribution": {"0": {"count": 4014, "fraction": 0.9398267384687427}, "1": {"count": 257, "fraction": 0.060173261531257315}}}}
+{"dataset": "narrativeqa", "seed": 99, "trees_root": "data/raptor_trees", "tree_dir": "data/raptor_trees/narrativeqa/seed99_trimap", "dr_method": "trimap", "num_trees_analyzed": 50, "cluster_and_summary_metrics": {"intra_cluster_sim_mean_across_docs_mean": 0.47163334488868713, "intra_cluster_sim_mean_across_docs_std": 0.030774669721722603, "intra_cluster_sim_std_across_docs_mean": 0.0823429673910141, "intra_cluster_sim_std_across_docs_std": 0.013623397797346115, "inter_cluster_sim_mean_across_docs_mean": 0.5801846981048584, "inter_cluster_sim_mean_across_docs_std": 0.11430884897708893, "inter_cluster_sim_std_across_docs_mean": 0.025162525475025177, "inter_cluster_sim_std_across_docs_std": 0.039030060172080994, "parent_child_sim_mean_across_docs_mean": 0.4555441737174988, "parent_child_sim_mean_across_docs_std": 0.031606025993824005, "parent_child_sim_std_across_docs_mean": 0.15210536122322083, "parent_child_sim_std_across_docs_std": 0.017350003123283386, "compression_ratio_mean_across_docs_mean": 0.055954042822122574, "compression_ratio_mean_across_docs_std": 0.0052986666560173035, "compression_ratio_std_across_docs_mean": 0.022784536704421043, "compression_ratio_std_across_docs_std": 0.007306556683033705, "children_tokens_mean_across_docs_mean": 2045.7645263671875, "children_tokens_mean_across_docs_std": 132.84625244140625, "summary_tokens_mean_across_docs_mean": 99.99281311035156, "summary_tokens_mean_across_docs_std": 0.035552214831113815}, "retrieval_layer_distribution": {"num_questions_used": 200, "total_selected_nodes": 4095, "layer_distribution": {"0": {"count": 3671, "fraction": 0.8964590964590965}, "1": {"count": 403, "fraction": 0.09841269841269841}, "2": {"count": 21, "fraction": 0.005128205128205128}}}}

@@ -1,3 +1,17 @@
 .vscode
 __pycache__
 */__pycache__
+*.out
+*.job
+**/*.out
+data/leaf_embeds
+data/processed/narrativeqa
+data/processed/qasper
+data/processed/quality
+data/processed/data
+data/raptor_trees
+trivia/evidence
+trivia/qa
+trivia/*.jsonl
+trivia/README
+**/*.job

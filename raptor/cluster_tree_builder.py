@@ -48,9 +48,9 @@ class ClusterTreeBuilder(TreeBuilder):
         self.clustering_algorithm = config.clustering_algorithm
         self.clustering_params = config.clustering_params
 
-        logging.info(
-            f"Successfully initialized ClusterTreeBuilder with Config {config.log_config()}"
-        )
+        # logging.info(
+        #     f"Successfully initialized ClusterTreeBuilder with Config {config.log_config()}"
+        # )
 
     def construct_tree(
         self,

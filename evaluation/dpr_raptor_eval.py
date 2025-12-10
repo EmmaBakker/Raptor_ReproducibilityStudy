@@ -508,10 +508,56 @@ def run_qasper(path: Path, with_raptor: bool, tree_dir: Path, embed_cache_dir: P
         "n": int(len(data)),
     }
 
+def run_triviaqa(path: Path, with_raptor: bool, tree_dir: Path, embed_cache_dir: Path, seed: int) -> Dict:
+    data = load_jsonl(path)
+    qa   = UnifiedQAModel(UQA_MODEL_NAME)
+    dpr_question = DPREmbeddingModel(QUESTION_ENCODER_MODEL_NAME, is_question=True)
+    dpr_context = DPREmbeddingModel(CONTEXT_ENCODER_MODEL_NAME, is_question=False)
+    # sbert = SBertEmbeddingModel("sentence-transformers/multi-qa-mpnet-base-cos-v1")
+    cfg = build_ra_with_dpr_config()
+    cache = RAPTORCache(cfg, tree_dir, seed)
+
+    f1s, empties = [], 0
+
+    for i, ex in enumerate(tqdm(data, desc="TriviaQA")):
+        doc  = _norm_text(ex["doc_text"])
+        q    = _norm_text(ex["question"])
+        refs = [_norm_text(r) for r in (ex.get("answers", []) or [])]
+        doc_key = ex.get("doc_id") or _sha1(doc)
+
+        if with_raptor:
+            ra = cache.get_or_build(doc, doc_key)
+            ctx = ra.retrieve(q, top_k=RAPTOR_TOP_K, max_tokens=RETRIEVAL_BUDGET,
+                              collapse_tree=True, return_layer_information=False)
+            if os.environ.get("DEBUG_EVAL") == "1":
+                logging.info(f"[dbg] raw ctx tokens: {_tok_len_cl100k(_norm_text(ctx))}")
+        else:
+            chunks = split_text(doc, TOK, LEAF_CHUNK_TOKENS)
+            ctx = baseline_dpr_context_cached(
+                chunks, q, dpr_question, dpr_context, TOK, embed_cache_dir, doc_key, RETRIEVAL_BUDGET
+            )
+
+        q_trim, c_trim = clip_for_unifiedqa(q, _norm_text(ctx), budget=UQA_MAX_LEN)
+        if os.environ.get("DEBUG_EVAL") == "1":
+            logging.info(f"[dbg] clipped ctx tokens: {_tok_len_cl100k(c_trim)}")
+            logging.info(f"[dbg] ctx sha1: {_sha1(c_trim)}")
+        pred = qa.answer_question(c_trim, q_trim)
+
+        if not pred.strip(): empties += 1
+        _maybe_debug_dump(i, q_trim, c_trim, pred, refs)
+        if refs:
+            f1s.append(f1_answer(pred, refs))
+
+    return {
+        "f1": float(np.mean(f1s) * 100 if f1s else 0.0),
+        "empty_preds": int(empties),
+        "n": int(len(data)),
+    }
+
 # CLI
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument("--dataset", choices=["narrativeqa", "quality", "qasper"], required=True)
+    ap.add_argument("--dataset", choices=["narrativeqa", "quality", "qasper", "triviaqa"], required=True)
     ap.add_argument("--split", required=True, help="Path to eval JSONL (e.g., .../eval_val.jsonl).")
     ap.add_argument("--with-raptor", action=argparse.BooleanOptionalAction, default=False,
                     help="Use RAPTOR (otherwise DPR leaf-only baseline).")
@@ -540,6 +586,8 @@ def main():
             metrics = run_narrativeqa(path, args.with_raptor, tree_dir, embed_cache_dir, seed)
         elif args.dataset == "quality":
             metrics = run_quality(path, args.with_raptor, tree_dir, embed_cache_dir, seed)
+        elif args.dataset == "triviaqa":
+            metrics = run_triviaqa(path, args.with_raptor, tree_dir, embed_cache_dir, seed)
         else:
             metrics = run_qasper(path, args.with_raptor, tree_dir, embed_cache_dir, seed)
         elapsed = time.time() - t0

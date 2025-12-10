@@ -151,9 +151,9 @@ class TreeBuilder:
         self.embedding_models = config.embedding_models
         self.cluster_embedding_model = config.cluster_embedding_model
 
-        logging.info(
-            f"Successfully initialized TreeBuilder with Config {config.log_config()}"
-        )
+        # logging.info(
+        #     f"Successfully initialized TreeBuilder with Config {config.log_config()}"
+        # )
 
     def create_node(
         self, index: int, text: str, children_indices: Optional[Set[int]] = None

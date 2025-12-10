@@ -41,6 +41,8 @@ def global_cluster_embeddings(
 def local_cluster_embeddings(
     embeddings: np.ndarray, dim: int, num_neighbors: int = 10, metric: str = "cosine"
 ) -> np.ndarray:
+    # print("=====Embeddings shape:=====", embeddings.shape)
+    embeddings = embeddings.reshape(embeddings.shape[0], -1)
     reduced_embeddings = umap.UMAP(
         n_neighbors=num_neighbors, n_components=dim, metric=metric
     ).fit_transform(embeddings)

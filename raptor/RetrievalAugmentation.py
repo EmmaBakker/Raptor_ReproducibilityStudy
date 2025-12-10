@@ -197,9 +197,9 @@ class RetrievalAugmentation:
         else:
             self.retriever = None
 
-        logging.info(
-            f"Successfully initialized RetrievalAugmentation with Config {config.log_config()}"
-        )
+        # logging.info(
+        #     f"Successfully initialized RetrievalAugmentation with Config {config.log_config()}"
+        # )
 
     def add_documents(self, docs):
         """

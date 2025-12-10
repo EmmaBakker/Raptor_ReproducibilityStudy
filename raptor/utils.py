@@ -127,9 +127,11 @@ def distances_from_embeddings(
         raise ValueError(
             f"Unsupported distance metric '{distance_metric}'. Supported metrics are: {list(distance_metrics.keys())}"
         )
+    query_embedding = np.asarray(query_embedding).reshape(-1)   # becomes (768,)
 
+    # print("Embedding shapes:::::::", query_embedding.shape, embeddings[0].shape)
     distances = [
-        distance_metrics[distance_metric](query_embedding, embedding)
+        distance_metrics[distance_metric](query_embedding, embedding.reshape(-1))
         for embedding in embeddings
     ]
 

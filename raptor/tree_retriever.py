@@ -139,9 +139,9 @@ class TreeRetriever(BaseRetriever):
 
         self.tree_node_index_to_layer = reverse_mapping(self.tree.layer_to_nodes)
 
-        logging.info(
-            f"Successfully initialized TreeRetriever with Config {config.log_config()}"
-        )
+        # logging.info(
+        #     f"Successfully initialized TreeRetriever with Config {config.log_config()}"
+        # )
 
     def create_embedding(self, text: str) -> List[float]:
         """

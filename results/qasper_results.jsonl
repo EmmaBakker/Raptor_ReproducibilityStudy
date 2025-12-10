@@ -1,0 +1,1 @@
+{"timestamp": 1764689811, "run_name": null, "dataset": "qasper", "split": "data/processed/qasper/eval_val_fixed_small.jsonl", "with_raptor": true, "seed": 224, "retrieval_budget": 2000, "uqa_context_budget": 400, "tb_max_tokens": 100, "metrics": {"f1": 20.00587673296152, "empty_preds": 0, "n": 189}, "elapsed_sec": 731.23}

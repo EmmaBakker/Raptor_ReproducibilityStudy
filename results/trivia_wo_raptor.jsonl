@@ -1,0 +1,1 @@
+{"timestamp": 1765152232, "run_name": null, "dataset": "triviaqa", "split": "trivia/eval_val.jsonl", "with_raptor": false, "seed": 224, "retrieval_budget": 2000, "uqa_context_budget": 400, "tb_max_tokens": 100, "metrics": {"f1": 83.43843843843844, "empty_preds": 0, "n": 296}, "elapsed_sec": 2130.09}

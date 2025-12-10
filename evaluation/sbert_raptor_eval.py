@@ -16,15 +16,19 @@ Usage examples
 --------------
 SBERT baseline (no tree):
   python evaluation/sbert_raptor_eval.py --dataset narrativeqa --split data/processed/narrativeqa/eval_val.jsonl --out results/table_runs.jsonl
-RAPTOR:
+BM25 baseline (no tree):
+  python evaluation/sbert_raptor_eval.py --dataset narrativeqa --split data/processed/narrativeqa/eval_val.jsonl --retrieval-method bm25 --out results/table_runs.jsonl
+RAPTOR with SBERT retrieval:
   python evaluation/sbert_raptor_eval.py --dataset narrativeqa --split data/processed/narrativeqa/eval_val.jsonl --with-raptor --out results/table_runs.jsonl
+RAPTOR with BM25 retrieval:
+  python evaluation/sbert_raptor_eval.py --dataset narrativeqa --split data/processed/narrativeqa/eval_val.jsonl --with-raptor --retrieval-method bm25 --out results/table_runs.jsonl
 Seed sweep:
   python evaluation/sbert_raptor_eval.py --dataset quality --split data/processed/quality/eval_val.jsonl --with-raptor --seeds 224 225 226
 """
 
 import os, json, argparse, re, string, hashlib, logging, time
 from pathlib import Path
-from typing import Dict, List, Tuple
+from typing import Dict, List, Tuple, Optional
 import numpy as np
 from tqdm import tqdm
 
@@ -83,6 +87,9 @@ if not getattr(_UQA_TOK, "model_max_length", None):
 # Import the repo’s own chunker (faithful to their baseline + builder)
 from raptor.utils import split_text
 
+# BM25
+from rank_bm25 import BM25Okapi
+
 # IO helpers
 def load_jsonl(path_jsonl: Path) -> List[Dict]:
     rows: List[Dict] = []
@@ -122,7 +129,7 @@ def trim_with_uqa_tok(s: str, max_tokens: int) -> str:
 def _tok_len_cl100k(s: str) -> int:
     return len(TOK.encode(s or ""))
 
-def clip_for_unifiedqa(question: str, context: str, budget: int | None = None) -> Tuple[str, str]:
+def clip_for_unifiedqa(question: str, context: str, budget: Optional[int] = None) -> Tuple[str, str]:
     tok = _UQA_TOK
     max_len = budget or int(tok.model_max_length or UQA_MAX_LEN)
     target = max(32, max_len - UQA_SAFETY)
@@ -321,6 +328,155 @@ def baseline_sbert_context_cached(
 
     return "\n\n".join(picked)
 
+# BM25 baseline retrieval
+def baseline_bm25_context(
+    leaf_chunks: List[str],
+    question: str,
+    tokenizer,
+    max_tokens: int = RETRIEVAL_BUDGET,
+    top_k: int = 50
+) -> str:
+    """
+    BM25 baseline retrieval from leaf chunks only (no RAPTOR tree).
+    
+    Args:
+        leaf_chunks: List of document chunks (100 tokens each)
+        question: Question text
+        tokenizer: For token counting
+        max_tokens: Maximum tokens to retrieve
+        top_k: Maximum chunks to consider
+        
+    Returns:
+        Concatenated text from top-scoring chunks
+    """
+    if not leaf_chunks:
+        return ""
+    
+    # Tokenize chunks for BM25
+    tokenized_chunks = [word_tokenize(chunk.lower()) for chunk in leaf_chunks]
+    
+    # Build BM25 index
+    bm25 = BM25Okapi(tokenized_chunks)
+    
+    # Score query
+    tokenized_query = word_tokenize(question.lower())
+    scores = bm25.get_scores(tokenized_query)
+    
+    # Rank chunks
+    ranked_indices = np.argsort(scores)[::-1]  # Descending order
+    
+    # Collect top chunks up to budget
+    selected_chunks = []
+    total_tokens = 0
+    
+    for i, idx in enumerate(ranked_indices):
+        if i >= top_k:
+            break
+            
+        chunk = leaf_chunks[idx]
+        chunk_tokens = len(tokenizer.encode(chunk))
+        
+        if total_tokens + chunk_tokens > max_tokens:
+            break
+        
+        selected_chunks.append(chunk)
+        total_tokens += chunk_tokens
+    
+    return "\n\n".join(selected_chunks)
+
+# BM25 retrieval from RAPTOR tree
+def raptor_bm25_retrieve(
+    ra: RetrievalAugmentation,
+    query: str,
+    tokenizer,
+    max_tokens: int = RETRIEVAL_BUDGET,
+    top_k: int = RAPTOR_TOP_K
+) -> str:
+    """
+    Retrieve from RAPTOR tree using BM25 instead of cosine similarity.
+    
+    Process:
+    1. Extract all nodes (leaves + summaries) from the tree
+    2. Build BM25 index over all node texts
+    3. Score query against all nodes
+    4. Return top-scoring nodes up to token budget
+    
+    Args:
+        ra: Built RetrievalAugmentation object with tree
+        query: Question text
+        tokenizer: Tokenizer for counting tokens (e.g., cl100k_base)
+        max_tokens: Maximum tokens to retrieve
+        top_k: Maximum number of nodes to consider
+        
+    Returns:
+        Concatenated text from top-scoring nodes
+    """
+    # Step 1: Extract all nodes from tree
+    tree = ra.tree
+    all_nodes = tree.all_nodes  # Dict[int, Node]
+    
+    # Create list of (node_id, node_text) pairs
+    node_data = []
+    for node_id, node in all_nodes.items():
+        text = node.text.strip()
+        if text:  # Skip empty nodes
+            node_data.append({
+                'id': node_id,
+                'text': text,
+                'layer': getattr(node, 'layer', -1),  # Track which layer node is from
+            })
+    
+    if not node_data:
+        return ""
+    
+    # Step 2: Build BM25 index
+    # Tokenize all node texts for BM25
+    node_texts = [item['text'] for item in node_data]
+    tokenized_corpus = [word_tokenize(text.lower()) for text in node_texts]
+    
+    # Create BM25 index
+    bm25 = BM25Okapi(tokenized_corpus)
+    
+    # Step 3: Score query
+    tokenized_query = word_tokenize(query.lower())
+    scores = bm25.get_scores(tokenized_query)
+    
+    # Step 4: Rank nodes by BM25 score
+    # Create list of (score, index) tuples
+    scored_indices = [(scores[i], i) for i in range(len(scores))]
+    # Sort by score descending
+    scored_indices.sort(reverse=True, key=lambda x: x[0])
+    
+    # Step 5: Collect top-k nodes up to token budget
+    selected_texts = []
+    total_tokens = 0
+    nodes_selected = 0
+    
+    for score, idx in scored_indices:
+        if nodes_selected >= top_k:
+            break
+            
+        text = node_data[idx]['text']
+        text_tokens = len(tokenizer.encode(text))
+        
+        # Check if adding this node exceeds budget
+        if total_tokens + text_tokens > max_tokens:
+            # Try to fit partial text if we have room
+            if total_tokens < max_tokens:
+                remaining = max_tokens - total_tokens
+                # Truncate text to fit remaining budget
+                truncated = trim_with_uqa_tok(text, remaining)
+                if truncated.strip():
+                    selected_texts.append(truncated)
+            break
+        
+        selected_texts.append(text)
+        total_tokens += text_tokens
+        nodes_selected += 1
+    
+    # Step 6: Return concatenated context
+    return "\n\n".join(selected_texts)
+
 # Debug helper
 def _maybe_debug_dump(example_idx: int, q: str, ctx: str, pred: str, refs_or_choices):
     if os.environ.get("DEBUG_EVAL", "") != "1":
@@ -335,7 +491,7 @@ def _maybe_debug_dump(example_idx: int, q: str, ctx: str, pred: str, refs_or_cho
     print("--- END DEBUG ---\n")
 
 # Runners
-def run_narrativeqa(path: Path, with_raptor: bool, tree_dir: Path, embed_cache_dir: Path, seed: int) -> Dict:
+def run_narrativeqa(path: Path, with_raptor: bool, tree_dir: Path, embed_cache_dir: Path, seed: int, retrieval_method: str = "sbert") -> Dict:
     data = load_jsonl(path)
     qa   = UnifiedQAModel(UQA_MODEL_NAME)
     sbert = SBertEmbeddingModel("sentence-transformers/multi-qa-mpnet-base-cos-v1")
@@ -351,15 +507,48 @@ def run_narrativeqa(path: Path, with_raptor: bool, tree_dir: Path, embed_cache_d
         refs = [_norm_text(r) for r in (ex.get("gold_answers", []) or [])]
         doc_key = ex.get("document_id") or _sha1(doc)
 
+        # Generate leaf chunks (needed for both methods)
+        chunks = split_text(doc, TOK, LEAF_CHUNK_TOKENS)
+        
         if with_raptor:
+            # Build RAPTOR tree (always uses SBERT for building)
             ra = cache.get_or_build(doc, doc_key)
-            ctx = ra.retrieve(q, top_k=RAPTOR_TOP_K, max_tokens=RETRIEVAL_BUDGET,
-                              collapse_tree=True, return_layer_information=False)
+            
+            # Choose retrieval method
+            if retrieval_method == "sbert":
+                # Original RAPTOR retrieval with SBERT embeddings
+                ctx = ra.retrieve(
+                    q, 
+                    top_k=RAPTOR_TOP_K, 
+                    max_tokens=RETRIEVAL_BUDGET,
+                    collapse_tree=True, 
+                    return_layer_information=False
+                )
+            elif retrieval_method == "bm25":
+                # BM25 retrieval from RAPTOR tree
+                ctx = raptor_bm25_retrieve(
+                    ra, 
+                    q, 
+                    TOK, 
+                    max_tokens=RETRIEVAL_BUDGET,
+                    top_k=RAPTOR_TOP_K
+                )
+            else:
+                raise ValueError(f"Unknown retrieval method: {retrieval_method}")
         else:
-            chunks = split_text(doc, TOK, LEAF_CHUNK_TOKENS)
-            ctx = baseline_sbert_context_cached(
-                chunks, q, sbert, TOK, embed_cache_dir, doc_key, RETRIEVAL_BUDGET
-            )
+            # Baseline (no RAPTOR tree)
+            if retrieval_method == "sbert":
+                # SBERT baseline with cached embeddings
+                ctx = baseline_sbert_context_cached(
+                    chunks, q, sbert, TOK, embed_cache_dir, doc_key, RETRIEVAL_BUDGET
+                )
+            elif retrieval_method == "bm25":
+                # BM25 baseline (no caching needed - fast enough)
+                ctx = baseline_bm25_context(
+                    chunks, q, TOK, max_tokens=RETRIEVAL_BUDGET
+                )
+            else:
+                raise ValueError(f"Unknown retrieval method: {retrieval_method}")
 
         # paper: ~400-token context to UQA (clip with UQA tokenizer)
         q_trim, c_trim = clip_for_unifiedqa(q, _norm_text(ctx), budget=UQA_MAX_LEN)
@@ -410,7 +599,7 @@ def _parse_quality_pred(pred: str, choices: List[str]) -> int:
         sims.append(len(ctoks & ptoks))
     return int(np.argmax(sims)) if sims else 0
 
-def run_quality(path: Path, with_raptor: bool, tree_dir: Path, embed_cache_dir: Path, seed: int) -> Dict:
+def run_quality(path: Path, with_raptor: bool, tree_dir: Path, embed_cache_dir: Path, seed: int, retrieval_method: str = "sbert") -> Dict:
     data = load_jsonl(path)
     qa   = UnifiedQAModel(UQA_MODEL_NAME)
     sbert = SBertEmbeddingModel("sentence-transformers/multi-qa-mpnet-base-cos-v1")
@@ -429,15 +618,49 @@ def run_quality(path: Path, with_raptor: bool, tree_dir: Path, embed_cache_dir: 
         n += 1
 
         doc_key = ex.get("article_id") or _sha1(doc)
+        
+        # Generate leaf chunks (needed for both methods)
+        chunks = split_text(doc, TOK, LEAF_CHUNK_TOKENS)
+        
         if with_raptor:
+            # Build RAPTOR tree (always uses SBERT for building)
             ra = cache.get_or_build(doc, doc_key)
-            ctx = ra.retrieve(q, top_k=RAPTOR_TOP_K, max_tokens=RETRIEVAL_BUDGET,
-                              collapse_tree=True, return_layer_information=False)
+            
+            # Choose retrieval method
+            if retrieval_method == "sbert":
+                # Original RAPTOR retrieval with SBERT embeddings
+                ctx = ra.retrieve(
+                    q, 
+                    top_k=RAPTOR_TOP_K, 
+                    max_tokens=RETRIEVAL_BUDGET,
+                    collapse_tree=True, 
+                    return_layer_information=False
+                )
+            elif retrieval_method == "bm25":
+                # BM25 retrieval from RAPTOR tree
+                ctx = raptor_bm25_retrieve(
+                    ra, 
+                    q, 
+                    TOK, 
+                    max_tokens=RETRIEVAL_BUDGET,
+                    top_k=RAPTOR_TOP_K
+                )
+            else:
+                raise ValueError(f"Unknown retrieval method: {retrieval_method}")
         else:
-            chunks = split_text(doc, TOK, LEAF_CHUNK_TOKENS)
-            ctx = baseline_sbert_context_cached(
-                chunks, q, sbert, TOK, embed_cache_dir, doc_key, RETRIEVAL_BUDGET
-            )
+            # Baseline (no RAPTOR tree)
+            if retrieval_method == "sbert":
+                # SBERT baseline with cached embeddings
+                ctx = baseline_sbert_context_cached(
+                    chunks, q, sbert, TOK, embed_cache_dir, doc_key, RETRIEVAL_BUDGET
+                )
+            elif retrieval_method == "bm25":
+                # BM25 baseline (no caching needed - fast enough)
+                ctx = baseline_bm25_context(
+                    chunks, q, TOK, max_tokens=RETRIEVAL_BUDGET
+                )
+            else:
+                raise ValueError(f"Unknown retrieval method: {retrieval_method}")
 
         q_with_opts = _quality_prompt(q, choices)
         q_trim, c_trim = clip_for_unifiedqa(q_with_opts, _norm_text(ctx), budget=UQA_MAX_LEN)
@@ -449,7 +672,7 @@ def run_quality(path: Path, with_raptor: bool, tree_dir: Path, embed_cache_dir: 
     acc = 100.0 * correct / max(1, n)
     return {"accuracy": float(acc), "n": int(n)}
 
-def run_qasper(path: Path, with_raptor: bool, tree_dir: Path, embed_cache_dir: Path, seed: int) -> Dict:
+def run_qasper(path: Path, with_raptor: bool, tree_dir: Path, embed_cache_dir: Path, seed: int, retrieval_method: str = "sbert") -> Dict:
     data = load_jsonl(path)
     qa   = UnifiedQAModel(UQA_MODEL_NAME)
     sbert = SBertEmbeddingModel("sentence-transformers/multi-qa-mpnet-base-cos-v1")
@@ -464,17 +687,50 @@ def run_qasper(path: Path, with_raptor: bool, tree_dir: Path, embed_cache_dir: P
         refs = [_norm_text(r) for r in (ex.get("gold_answers", []) or [])]
         doc_key = ex.get("paper_id") or _sha1(doc)
 
+        # Generate leaf chunks (needed for both methods)
+        chunks = split_text(doc, TOK, LEAF_CHUNK_TOKENS)
+        
         if with_raptor:
+            # Build RAPTOR tree (always uses SBERT for building)
             ra = cache.get_or_build(doc, doc_key)
-            ctx = ra.retrieve(q, top_k=RAPTOR_TOP_K, max_tokens=RETRIEVAL_BUDGET,
-                              collapse_tree=True, return_layer_information=False)
+            
+            # Choose retrieval method
+            if retrieval_method == "sbert":
+                # Original RAPTOR retrieval with SBERT embeddings
+                ctx = ra.retrieve(
+                    q, 
+                    top_k=RAPTOR_TOP_K, 
+                    max_tokens=RETRIEVAL_BUDGET,
+                    collapse_tree=True, 
+                    return_layer_information=False
+                )
+            elif retrieval_method == "bm25":
+                # BM25 retrieval from RAPTOR tree
+                ctx = raptor_bm25_retrieve(
+                    ra, 
+                    q, 
+                    TOK, 
+                    max_tokens=RETRIEVAL_BUDGET,
+                    top_k=RAPTOR_TOP_K
+                )
+            else:
+                raise ValueError(f"Unknown retrieval method: {retrieval_method}")
             if os.environ.get("DEBUG_EVAL") == "1":
                 logging.info(f"[dbg] raw ctx tokens: {_tok_len_cl100k(_norm_text(ctx))}")
         else:
-            chunks = split_text(doc, TOK, LEAF_CHUNK_TOKENS)
-            ctx = baseline_sbert_context_cached(
-                chunks, q, sbert, TOK, embed_cache_dir, doc_key, RETRIEVAL_BUDGET
-            )
+            # Baseline (no RAPTOR tree)
+            if retrieval_method == "sbert":
+                # SBERT baseline with cached embeddings
+                ctx = baseline_sbert_context_cached(
+                    chunks, q, sbert, TOK, embed_cache_dir, doc_key, RETRIEVAL_BUDGET
+                )
+            elif retrieval_method == "bm25":
+                # BM25 baseline (no caching needed - fast enough)
+                ctx = baseline_bm25_context(
+                    chunks, q, TOK, max_tokens=RETRIEVAL_BUDGET
+                )
+            else:
+                raise ValueError(f"Unknown retrieval method: {retrieval_method}")
 
         q_trim, c_trim = clip_for_unifiedqa(q, _norm_text(ctx), budget=UQA_MAX_LEN)
         if os.environ.get("DEBUG_EVAL") == "1":
@@ -499,7 +755,13 @@ def main():
     ap.add_argument("--dataset", choices=["narrativeqa", "quality", "qasper"], required=True)
     ap.add_argument("--split", required=True, help="Path to eval JSONL (e.g., .../eval_val.jsonl).")
     ap.add_argument("--with-raptor", action=argparse.BooleanOptionalAction, default=False,
-                    help="Use RAPTOR (otherwise SBERT leaf-only baseline).")
+                    help="Use RAPTOR (otherwise baseline leaf-only retrieval).")
+    ap.add_argument("--retrieval-method", 
+                    choices=["sbert", "bm25"], 
+                    default="sbert",
+                    help="Retrieval method: 'sbert' (semantic) or 'bm25' (lexical). "
+                         "For baseline: chooses retrieval algorithm. "
+                         "For RAPTOR: chooses how to query the tree (tree still built with SBERT).")
     ap.add_argument("--seeds", type=int, nargs="+", default=[DEFAULT_SEED],
                     help="One or more seeds to run. Example: --seeds 224 225 226")
     ap.add_argument("--out", default="results/table_runs.jsonl", help="Append JSONL results here.")
@@ -522,11 +784,11 @@ def main():
 
         t0 = time.time()
         if args.dataset == "narrativeqa":
-            metrics = run_narrativeqa(path, args.with_raptor, tree_dir, embed_cache_dir, seed)
+            metrics = run_narrativeqa(path, args.with_raptor, tree_dir, embed_cache_dir, seed, retrieval_method=args.retrieval_method)
         elif args.dataset == "quality":
-            metrics = run_quality(path, args.with_raptor, tree_dir, embed_cache_dir, seed)
+            metrics = run_quality(path, args.with_raptor, tree_dir, embed_cache_dir, seed, retrieval_method=args.retrieval_method)
         else:
-            metrics = run_qasper(path, args.with_raptor, tree_dir, embed_cache_dir, seed)
+            metrics = run_qasper(path, args.with_raptor, tree_dir, embed_cache_dir, seed, retrieval_method=args.retrieval_method)
         elapsed = time.time() - t0
 
         record = {
@@ -535,6 +797,7 @@ def main():
             "dataset": args.dataset,
             "split": str(path),
             "with_raptor": bool(args.with_raptor),
+            "retrieval_method": args.retrieval_method,
             "seed": int(seed),
             "retrieval_budget": RETRIEVAL_BUDGET,
             "uqa_context_budget": UQA_CONTEXT_BUDGET,

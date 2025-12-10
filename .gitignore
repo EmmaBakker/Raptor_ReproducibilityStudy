@@ -1,17 +1,71 @@
-.vscode
-__pycache__
+# Secrets and API keys
+config/secrets.env
+
+# Python
+__pycache__/
 */__pycache__
-*.out
-*.job
-**/*.out
+*.py[cod]
+*$py.class
+*.so
+.Python
+*.egg-info/
+*.egg
+.eggs/
+dist/
+build/
+*.whl
+
+# Virtual environments
+venv/
+env/
+.env/
+raptor_env/
+
+# Jupyter
+.ipynb_checkpoints/
+*.ipynb_checkpoints
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Data files (large)
+data/raw/
+data/raptor_trees/
+data/embed_cache/
 data/leaf_embeds
 data/processed/narrativeqa
 data/processed/qasper
 data/processed/quality
 data/processed/data
-data/raptor_trees
+*.pkl
+*.pt
+*.bin
+*.h5
+*.hdf5
+
+# Model weights
+models/
+
+# Logs and outputs
+*.log
+*.out
+*.job
+**/*.out
+aouts/
+**/*.job
+
+# Results (optional - uncomment if you want to track results)
+# results/
+
+#TriviaQA
 trivia/evidence
 trivia/qa
 trivia/*.jsonl
 trivia/README
-**/*.job

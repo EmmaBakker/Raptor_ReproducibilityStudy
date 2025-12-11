@@ -305,7 +305,7 @@ def baseline_dpr_context_cached(
         embs = np.array([context_embed_model.create_embedding(_norm_text(t)) for t in leaf_chunks],
                         dtype=np.float32)
         np.save(path, embs)
-    print("embs.shape::::::", embs.shape)
+    # print("embs.shape::::::", embs.shape)
 
     embs = embs.reshape(embs.shape[0], -1)
     index = faiss.IndexFlatIP(embs.shape[1])

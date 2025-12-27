@@ -4,6 +4,7 @@ from abc import ABC, abstractmethod
 from openai import OpenAI
 from sentence_transformers import SentenceTransformer
 from tenacity import retry, stop_after_attempt, wait_random_exponential
+from transformers import DPRContextEncoder, DPRContextEncoderTokenizer, DPRQuestionEncoder, DPRQuestionEncoderTokenizer
 
 from typing import Iterable, Union
 import numpy as np

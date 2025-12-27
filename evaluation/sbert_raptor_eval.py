@@ -308,7 +308,6 @@ def baseline_sbert_context_cached(
                         dtype=np.float32)
         np.save(path, embs)
 
-    embs = embs.reshape(embs.shape[0], -1)
     index = faiss.IndexFlatIP(embs.shape[1])
     index.add(embs)
 

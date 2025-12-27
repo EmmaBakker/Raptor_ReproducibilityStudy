@@ -1,0 +1,67 @@
+#!/bin/bash
+#SBATCH --partition=gpu_h100
+#SBATCH --gpus=1
+#SBATCH --job-name=posthoc
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=05:00:00
+#SBATCH --chdir=/home/scur1687/raptor_clean
+#SBATCH --output=/home/scur1687/raptor_clean/logs/out-%x.%A.out
+#SBATCH --error=/home/scur1687/raptor_clean/logs/err-%x.%A.err
+
+set -euo pipefail
+
+# --- Modules & Conda env ---
+module purge
+module load 2023
+module load Anaconda3/2023.07-2
+
+# Robust conda activation in non-interactive shells
+eval "$(conda shell.bash hook)"
+conda activate raptor_env
+
+# --- Make repo importable as 'raptor' (safe with set -u) ---
+export PYTHONPATH="/home/scur1687/raptor_clean:${PYTHONPATH:-}"
+
+export HF_HOME="$HOME/.cache/huggingface"
+export TRANSFORMERS_CACHE="$HF_HOME/transformers"
+export NLTK_DATA="$HOME/.cache/nltk"
+export TORCH_HOME="$HOME/.cache/torch"
+
+
+export OPENAI_API_KEY="""
+
+# Sanity check
+python - <<'PY'
+import os, sys
+print("CWD:", os.getcwd())
+print("Top of sys.path:", sys.path[:3])
+import raptor
+print("raptor import OK from:", raptor.__file__)
+PY
+
+for s in 224 42 99; do
+  python evaluation/posthoc_cluster_baseline.py \
+    --dataset qasper \
+    --split data/processed/qasper/eval_val_sub50_q5.jsonl \
+    --seed $s \
+    --out results/qasper_posthoc_cluster_seed${s}.json
+done
+
+for s in 224 42 99; do
+  python evaluation/posthoc_cluster_baseline.py \
+    --dataset qasper \
+    --split data/processed/qasper/eval_val_sub50_q5.jsonl \
+    --seed $s \
+    --out results/qasper_posthoc_cluster_seed${s}.json
+done
+
+for s in 224 42 99; do
+  python evaluation/posthoc_cluster_baseline.py \
+    --dataset qasper \
+    --split data/processed/qasper/eval_val_sub50_q5.jsonl \
+    --seed $s \
+    --out results/qasper_posthoc_cluster_seed${s}.json
+done
+
+

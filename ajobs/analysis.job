@@ -1,0 +1,96 @@
+#!/bin/bash
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=analysis
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=10:00:00
+#SBATCH --chdir=/home/scur1687/raptor_clean
+#SBATCH --output=/home/scur1687/raptor_clean/logs/out-%x.%A.out
+#SBATCH --error=/home/scur1687/raptor_clean/logs/err-%x.%A.err
+
+set -euo pipefail
+
+# --- Modules & Conda env ---
+module purge
+module load 2023
+module load Anaconda3/2023.07-2
+
+# Robust conda activation in non-interactive shells
+eval "$(conda shell.bash hook)"
+conda activate raptor_env
+
+# --- Make repo importable as 'raptor' (safe with set -u) ---
+export PYTHONPATH="/home/scur1687/raptor_clean:${PYTHONPATH:-}"
+
+export HF_HOME="$HOME/.cache/huggingface"
+export TRANSFORMERS_CACHE="$HF_HOME/transformers"
+export NLTK_DATA="$HOME/.cache/nltk"
+export TORCH_HOME="$HOME/.cache/torch"
+
+
+export OPENAI_API_KEY=""
+# Sanity check
+python - <<'PY'
+import os, sys
+print("CWD:", os.getcwd())
+print("Top of sys.path:", sys.path[:3])
+import raptor
+print("raptor import OK from:", raptor.__file__)
+PY
+
+python analysis/analysis.py \
+  --trees-root data/raptor_trees \
+  --tree-subdir-template "seed{seed}_umap_raptor" \
+  --baseline-embeds data/leaf_embeds \
+  --do-overlap \
+  --full-tree-metrics \
+  --datasets quality narrativeqa \
+  --seeds 224 99 42 \
+  --max-q 250 \
+  --out results_raptor/diagnostics_umap_raptor.json
+
+python analysis/analysis.py \
+  --trees-root data/raptor_trees \
+  --tree-subdir-template "seed{seed}_trimap_raptor" \
+  --baseline-embeds data/leaf_embeds \
+  --do-overlap \
+  --full-tree-metrics \
+  --datasets quality narrativeqa \
+  --seeds 224 99 42 \
+  --max-q 250 \
+  --out results_trimap/diagnostics_trimap_raptor.json
+
+python analysis/analysis.py \
+  --trees-root data/raptor_trees \
+  --tree-subdir-template "seed{seed}_pacmap_raptor" \
+  --baseline-embeds data/leaf_embeds \
+  --do-overlap \
+  --full-tree-metrics \
+  --datasets quality narrativeqa \
+  --seeds 224 99 42 \
+  --max-q 250 \
+  --out results_pacmap/diagnostics_pacmap_raptor.json
+
+python analysis/analysis.py \
+  --trees-root data/raptor_trees \
+  --tree-subdir-template "seed{seed}_umap_hdbscan" \
+  --baseline-embeds data/leaf_embeds \
+  --do-overlap \
+  --full-tree-metrics \
+  --datasets quality narrativeqa \
+  --seeds 224 99 42 \
+  --max-q 250 \
+  --out results_hdbscan/diagnostics_umap_hdbscan.json
+
+python analysis/analysis.py \
+  --trees-root data/raptor_trees \
+  --tree-subdir-template "seed{seed}_none_hdbscan" \
+  --baseline-embeds data/leaf_embeds \
+  --do-overlap \
+  --full-tree-metrics \
+  --datasets quality narrativeqa \
+  --seeds 224 99 42 \
+  --max-q 250 \
+  --out results_hdbscan/diagnostics_none_hdbscan.json
+

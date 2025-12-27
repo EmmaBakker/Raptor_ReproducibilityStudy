@@ -2,15 +2,15 @@ datasets
 pandas
 nltk
 beautifulsoup4
-
+pyarrow
+huggingface_hub 
+fsspec 
+aiohttp
 
 # For downloading narrativeqa do:
 #
 # mkdir -p data/raw/narrativeqa_stories
 # cd data/raw/narrativeqa_stories
-# git clone https://github.com/google-deepmind/narrativeqa tmp_nqa
-# bash tmp_nqa/download_stories_parallel.sh  # Parallelized version (much faster!)
-#
-# Or use original (slower):
+# git clone https://github.com/deepmind/narrativeqa tmp_nqa
 # bash tmp_nqa/download_stories.sh
 #

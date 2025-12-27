@@ -1,0 +1,78 @@
+#!/bin/bash
+#SBATCH --partition=gpu_a100
+#SBATCH --gpus=1
+#SBATCH --job-name=layer_runs
+#SBATCH --ntasks=1
+#SBATCH --cpus-per-task=9
+#SBATCH --time=05:00:00
+#SBATCH --chdir=/home/scur1687/raptor_clean
+#SBATCH --output=/home/scur1687/raptor_clean/logs/out-%x.%A.out
+#SBATCH --error=/home/scur1687/raptor_clean/logs/err-%x.%A.err
+
+set -euo pipefail
+
+# --- Modules & Conda env ---
+module purge
+module load 2023
+module load Anaconda3/2023.07-2
+
+# Robust conda activation in non-interactive shells
+eval "$(conda shell.bash hook)"
+conda activate raptor_env
+
+# --- Make repo importable as 'raptor' (safe with set -u) ---
+export PYTHONPATH="/home/scur1687/raptor_clean:${PYTHONPATH:-}"
+
+export HF_HOME="$HOME/.cache/huggingface"
+export TRANSFORMERS_CACHE="$HF_HOME/transformers"
+export NLTK_DATA="$HOME/.cache/nltk"
+export TORCH_HOME="$HOME/.cache/torch"
+
+
+export OPENAI_API_KEY=""""
+
+# Sanity check
+python - <<'PY'
+import os, sys
+print("CWD:", os.getcwd())
+print("Top of sys.path:", sys.path[:3])
+import raptor
+print("raptor import OK from:", raptor.__file__)
+PY
+
+for l in 1 3 5 8; do
+  python evaluation/layer_run_narrativeqa.py \
+    --split data/processed/narrativeqa/eval_val_sub50_q5.jsonl \
+    --num-layers $l \
+    --tree-dir data/raptor_trees \
+    --out results/layer_runs.jsonl \
+    --dr-method umap \
+    --clusterer raptor \
+    --seeds 224 \
+    --run-name depth_ablation
+done
+
+for l in 1 3 5 8; do
+  python evaluation/layer_run_quality.py \
+    --split data/processed/quality/eval_val_sub50_q5.jsonl \
+    --num-layers $l \
+    --tree-dir data/raptor_trees \
+    --out results/layer_runs.jsonl \
+    --dr-method umap \
+    --clusterer raptor \
+    --seeds 224 42 99 \
+    --run-name depth_ablation
+done
+
+
+for l in 1 3 5 8; do
+  python evaluation/layer_run_qasper.py \
+    --split data/processed/qasper/eval_val_sub50_q5.jsonl \
+    --num-layers $l \
+    --tree-dir data/raptor_trees \
+    --out results/layer_runs.jsonl \
+    --dr-method umap \
+    --clusterer raptor \
+    --seeds 224 42 99 \
+    --run-name depth_ablation
+done

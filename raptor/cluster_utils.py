@@ -62,24 +62,62 @@ def _dr_with_method(
         )
         return reducer.fit_transform(X)
 
-    if dr_method == "pacmap":
-        if pacmap is None:
-            raise ImportError("PaCMAP is not installed, but dr_method='pacmap' was requested.")
-        # PaCMAP ignores metric; it always works in Euclidean space
-        reducer = pacmap.PaCMAP(
-            n_components=dim,
-            random_state=RANDOM_SEED,
-        )
-        return reducer.fit_transform(X)
-
     if dr_method == "trimap":
         if trimap is None:
             raise ImportError("TriMAP is not installed, but dr_method='trimap' was requested.")
+
+        n_samples = X.shape[0]
+        if n_samples <= 3:
+            # Too few samples for proper DR → just truncate
+            target_dim = min(dim, X.shape[1])
+            return X[:, :target_dim]
+
+        target_dim = max(1, min(dim, n_samples - 2))
+
+        # Make TriMAP config valid for small n
+        n_inliers = min(10, max(1, n_samples - 2))
+        n_outliers = min(5, max(1, n_samples - 3))
+        n_random = min(5, max(1, n_samples - 3))
+
         reducer = trimap.TRIMAP(
-            n_components=dim,
-            random_state=RANDOM_SEED,
+            n_dims=target_dim,
+            distance=metric,   # "cosine"
+            n_inliers=n_inliers,
+            n_outliers=n_outliers,
+            n_random=n_random,
+            apply_pca=True,
+            verbose=False,
         )
         return reducer.fit_transform(X)
+
+    if dr_method == "pacmap":
+        if pacmap is None:
+            raise ImportError("PaCMAP is not installed, but dr_method='pacmap' was requested.")
+
+        n_samples, n_features = X.shape
+
+        if n_samples <= 3:
+            target_dim = min(dim, n_features)
+            return X[:, :target_dim]
+
+        target_dim = max(1, min(dim, n_features, n_samples - 2))
+
+        Xn = X / (np.linalg.norm(X, axis=1, keepdims=True) + 1e-12)
+
+        if n_neighbors is None:
+            n_neighbors = int((n_samples - 1) ** 0.5)
+        n_neighbors = max(2, min(int(n_neighbors), n_samples - 1))
+
+        reducer = pacmap.PaCMAP(
+            n_components=target_dim,
+            n_neighbors=n_neighbors,
+            MN_ratio=0.5,
+            FP_ratio=2.0,
+            random_state=RANDOM_SEED,
+        )
+        return reducer.fit_transform(Xn)
+
+
 
     raise ValueError(f"Unsupported dr_method '{dr_method}'. Use 'umap', 'pacmap', 'trimap', or 'none'.")
 
@@ -326,6 +364,17 @@ def HDBSCAN_cluster(
     clusters_per_point = [np.array([lbl]) for lbl in labels]
     return clusters_per_point
 
+"""CHANGED"""
+def _safe_token_len(text, tokenizer):
+    # Original code assumed text is a string; we preserve this
+    # but defensively coerce anything else into a string.
+    if not isinstance(text, str):
+        if isinstance(text, (list, tuple)):
+            text = " ".join(map(str, text))
+        else:
+            text = str(text)
+    return len(tokenizer.encode(text))
+"""CHANGED"""
 
 # Clusterer interfaces
 
@@ -383,9 +432,11 @@ class RAPTOR_Clustering(ClusteringAlgorithm):
                 node_clusters.append(cluster_nodes)
                 continue
 
+            total_length = sum(_safe_token_len(node.text, tokenizer) for node in cluster_nodes)
+            """CHANGED
             total_length = sum(
                 len(tokenizer.encode(node.text)) for node in cluster_nodes
-            )
+            )"""
 
             if total_length > max_length_in_cluster:
                 if verbose:
@@ -464,9 +515,11 @@ class HDBSCAN_Clustering(ClusteringAlgorithm):
                 node_clusters.append(cluster_nodes)
                 continue
 
+            total_length = sum(_safe_token_len(node.text, tokenizer) for node in cluster_nodes)
+            """CHANGED
             total_length = sum(
                 len(tokenizer.encode(node.text)) for node in cluster_nodes
-            )
+            )"""
 
             if total_length > max_length_in_cluster:
                 if verbose:

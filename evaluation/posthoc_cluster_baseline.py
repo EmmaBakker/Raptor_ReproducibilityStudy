@@ -1,56 +1,100 @@
 #!/usr/bin/env python3
 """
-Outputs metrics comparable to your other runs:
-  - NarrativeQA: BLEU-1, BLEU-4, ROUGE-L, METEOR
-  - QuALITY: accuracy
-  - QASPER: token-level F1
+Post-hoc clustering + summarization baseline (NO TREE).
 
-  python analysis/posthoc_cluster_baseline.py \
-      --dataset quality \
-      --split data/processed/quality/eval_val_sub50_q5.jsonl \
-      --seed 224 \
-      --out results/quality_posthoc_cluster.json
+This file is the same post-hoc baseline you had (HDBSCAN only), but extended to:
+  - support NarrativeQA + QuALITY + QASPER
+  - compute metrics IDENTICALLY to your RAPTOR eval:
+      NarrativeQA: BLEU-1, BLEU-4(equal), ROUGE-L(F1+stemmer), METEOR(tokenized)
+      QuALITY: accuracy with the same prompt + parsing
+      QASPER: SQuAD-style token-F1
+  - use the same UnifiedQA clipping logic as RAPTOR eval (budget + safety + 400 ctx tokens)
+
+It still:
+  - builds leaf chunks with split_text(100 tokens, cl100k_base)
+  - baseline retrieves with FAISS IndexFlatIP + greedy token budget (2000)
+  - posthoc summarizes the HDBSCAN clusters touched by baseline retrieval
+  - prepends top-K touched cluster summaries to baseline context
+
+Fixes in this version:
+  - Clip summarization input to avoid OpenAI context length errors (NarrativeQA has huge docs).
+  - Never store exception objects as summaries; skip failed summaries safely.
 """
 
 import argparse
 import json
 import logging
-from collections import defaultdict
+import os
+import re
+import string
+import time
+import hashlib
 from pathlib import Path
 from typing import Dict, List, Tuple
 
 import numpy as np
 import tiktoken
 import hdbscan
+import faiss
+from tqdm import tqdm
 
-from eval import (  # adjust if your file is named differently
-    LEAF_CHUNK_TOKENS,
-    RETRIEVAL_BUDGET,
-    UQA_MODEL_NAME,
-    UQA_MAX_LEN,
-    _norm_text,
-    _sha1,
-    clip_for_unifiedqa,
-)
+# -------------------------
+# Determinism (same style)
+# -------------------------
+def set_global_seed(seed: int = 224):
+    import random
+    random.seed(seed)
+    np.random.seed(seed)
+    os.environ["PYTHONHASHSEED"] = str(seed)
+    try:
+        import torch
+        torch.manual_seed(seed)
+        torch.cuda.manual_seed_all(seed)
+    except Exception:
+        pass
 
+DEFAULT_SEED = 224
+
+# -------------------------
+# Shared constants (paper-aligned)
+# -------------------------
+LEAF_CHUNK_TOKENS = 100
+RETRIEVAL_BUDGET = 2000
+UQA_MODEL_NAME = "allenai/unifiedqa-v2-t5-3b-1363200"
+UQA_MAX_LEN = 512
+UQA_CONTEXT_BUDGET = 400
+UQA_SAFETY = 12
+
+SUMMARY_MAX_TOKENS = 100
+CLUSTER_TOP_K = 5          # mirror RAPTOR TreeBuilder top_k=5
+BASELINE_TOP_K = 50        # mirror RAPTOR retriever top_k usage
+
+# NEW: summarizer input safety cap (GPT-3.5-turbo often 16k context; keep margin)
+SUMMARIZER_MAX_INPUT_TOKENS = 12000
+
+TOK = tiktoken.get_encoding("cl100k_base")
+
+# -------------------------
+# Models
+# -------------------------
 from raptor.EmbeddingModels import SBertEmbeddingModel
 from raptor.QAModels import UnifiedQAModel
 from raptor.SummarizationModels import GPT3TurboSummarizationModel
 from raptor.utils import split_text
 
+_SBERT = SBertEmbeddingModel("sentence-transformers/multi-qa-mpnet-base-cos-v1")
+
+# -------------------------
+# Logging
+# -------------------------
 logging.basicConfig(
     format="%(asctime)s - %(levelname)s - %(message)s",
     level=logging.INFO,
 )
 
-TOK = tiktoken.get_encoding("cl100k_base")
-
-# Single global SBERT model to avoid re-loading
-_GLOBAL_SBERT = SBertEmbeddingModel("sentence-transformers/multi-qa-mpnet-base-cos-v1")
-
-
-# Basic IO helpers
-
+# -------------------------
+# IO helpers
+# -------------------------
 def load_jsonl(path: Path) -> List[Dict]:
     rows: List[Dict] = []
     with path.open("r", encoding="utf-8") as f:
@@ -60,73 +104,99 @@ def load_jsonl(path: Path) -> List[Dict]:
                 rows.append(json.loads(line))
     return rows
 
+def _sha1(s: str) -> str:
+    return hashlib.sha1(s.encode("utf-8")).hexdigest()
 
-def get_doc_key(dataset: str, ex: Dict, doc_text: str) -> str:
-    """
-    Mirror your other analysis scripts for doc_key logic.
-    """
-    if dataset == "narrativeqa":
-        return ex.get("document_id") or _sha1(doc_text)
-    elif dataset == "quality":
-        return ex.get("article_id") or _sha1(doc_text)
-    elif dataset == "qasper":
-        return str(ex.get("paper_id") or ex.get("document_id") or _sha1(doc_text))
-    else:
-        raise ValueError(f"Unknown dataset: {dataset}")
+def _norm_text(x) -> str:
+    if isinstance(x, dict):
+        for k in ("text", "question", "q", "context", "doc", "document"):
+            if k in x and isinstance(x[k], str):
+                return x[k]
+        for v in x.values():
+            if isinstance(v, str):
+                return v
+        return str(x)
+    return str(x)
 
+# -------------------------
+# UnifiedQA clipping (IDENTICAL to your RAPTOR eval)
+# -------------------------
+from transformers import AutoTokenizer
+_UQA_TOK = AutoTokenizer.from_pretrained(UQA_MODEL_NAME, use_fast=False)
+if not getattr(_UQA_TOK, "model_max_length", None):
+    _UQA_TOK.model_max_length = UQA_MAX_LEN
 
-# Metrics (copied / aligned with your other analysis scripts)
+def clip_for_unifiedqa(question: str, context: str, budget: int | None = None) -> Tuple[str, str]:
+    tok = _UQA_TOK
+    max_len = budget or int(tok.model_max_length or UQA_MAX_LEN)
+    target = max(32, max_len - UQA_SAFETY)
+    sep = " \n "
 
-import re
-import string
+    q_ids = tok.encode(str(question).strip(), add_special_tokens=False)
+    c_ids = tok.encode(str(context).strip(), add_special_tokens=False)
+    sep_ids = tok.encode(sep, add_special_tokens=False)
 
+    # Keep context near requested budget first
+    c_ids = c_ids[:UQA_CONTEXT_BUDGET]
+
+    def total_len(qi, ci): return len(qi) + len(sep_ids) + len(ci)
+    qi, ci = q_ids, c_ids
+
+    # Trim if needed to satisfy total <= ~max_len
+    if total_len(qi, ci) > target:
+        over = total_len(qi, ci) - target
+        if over > 0:
+            ci = ci[: max(0, len(ci) - over)]
+    if total_len(qi, ci) > target:
+        over = total_len(qi, ci) - target
+        qi = qi[: max(0, len(qi) - over)]
+
+    q_trim = tok.decode(qi, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+    c_trim = tok.decode(ci, skip_special_tokens=True, clean_up_tokenization_spaces=True)
+    return q_trim, c_trim
+
+# -------------------------
+# Metrics (IDENTICAL to your RAPTOR eval)
+# -------------------------
 import nltk
+nltk.download('punkt', quiet=True)
+nltk.download('wordnet', quiet=True)
+nltk.download('omw-1.4', quiet=True)
+try:
+    nltk.data.find('tokenizers/punkt_tab/english/')
+except LookupError:
+    nltk.download('punkt_tab', quiet=True)
+
 from nltk.tokenize import word_tokenize
 from nltk.translate.bleu_score import SmoothingFunction, sentence_bleu
 from nltk.translate.meteor_score import meteor_score
 from rouge_score import rouge_scorer
 
-# Ensure NLTK resources
-nltk.download("punkt", quiet=True)
-nltk.download("wordnet", quiet=True)
-nltk.download("omw-1.4", quiet=True)
-
-
 def bleu1(refs: List[str], hyp: str) -> float:
     ref_tok = [word_tokenize(r) for r in refs]
     hyp_tok = word_tokenize(hyp)
-    ch = SmoothingFunction().method1
-    return sentence_bleu(
-        ref_tok, hyp_tok, weights=(1.0, 0, 0, 0), smoothing_function=ch
-    ) * 100
-
+    ch = SmoothingFunction().method3
+    return sentence_bleu(ref_tok, hyp_tok, weights=(1.0, 0, 0, 0), smoothing_function=ch) * 100
 
 def bleu4_equal(refs: List[str], hyp: str) -> float:
     ref_tok = [word_tokenize(r) for r in refs]
     hyp_tok = word_tokenize(hyp)
-    ch = SmoothingFunction().method1
-    return sentence_bleu(
-        ref_tok, hyp_tok, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=ch
-    ) * 100
-
+    ch = SmoothingFunction().method3
+    return sentence_bleu(ref_tok, hyp_tok, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=ch) * 100
 
 def rougeL(refs: List[str], hyp: str) -> float:
-    scorer = rouge_scorer.RougeScorer(["rougeL"], use_stemmer=True)
-    scores = [scorer.score(r, hyp)["rougeL"].fmeasure for r in refs]
+    scorer = rouge_scorer.RougeScorer(['rougeL'], use_stemmer=True)
+    scores = [scorer.score(r, hyp)['rougeL'].fmeasure for r in refs]
     return (max(scores) * 100) if scores else 0.0
-
 
 def meteor_tokenized(refs: List[str], hyp: str) -> float:
     ref_tokens = [word_tokenize(r) for r in refs]
     hyp_tokens = word_tokenize(hyp)
     return meteor_score(ref_tokens, hyp_tokens) * 100
 
-
-# QASPER F1
-
+# QASPER token-F1 (SQuAD-style)
 _ARTS = {"a", "an", "the"}
 _PUNC_TABLE = str.maketrans("", "", string.punctuation)
-
 
 def _normalize_f1(s: str) -> List[str]:
     s = s.lower()
@@ -134,7 +204,6 @@ def _normalize_f1(s: str) -> List[str]:
     s = re.sub(r"\s+", " ", s).strip()
     toks = s.split()
     return [t for t in toks if t not in _ARTS]
-
 
 def f1_answer(pred: str, golds: List[str]) -> float:
     def f1(a, b):
@@ -147,43 +216,33 @@ def f1_answer(pred: str, golds: List[str]) -> float:
         if common == 0:
             return 0.0
         prec = common / len(A)
-        rec = common / len(B)
+        rec  = common / len(B)
         return 2 * prec * rec / (prec + rec)
-
     return max((f1(pred, g) for g in golds), default=0.0)
 
-
-# QuALITY multiple-choice helpers
-
+# QuALITY prompting/parsing (IDENTICAL)
 _LETTERS = "ABCDEFGHIJKLMNOPQRSTUVWXYZ"
 
-
-def quality_prompt(question: str, choices: List[str]) -> str:
-    lettered = "\n".join(
-        [f"({chr(ord('A') + i)}) {c}" for i, c in enumerate(choices)]
-    )
+def _quality_prompt(question: str, choices: List[str]) -> str:
+    lettered = "\n".join([f"({chr(ord('A')+i)}) {c}" for i, c in enumerate(choices)])
     return f"{question}\n\nOptions:\n{lettered}\n\nAnswer with the option letter."
 
-
-def parse_quality_pred(pred: str, choices: List[str]) -> int:
+def _parse_quality_pred(pred: str, choices: List[str]) -> int:
     p = pred.strip().upper()
-    # Look for letter A/B/C/...
-    for i, L in enumerate(_LETTERS[: len(choices)]):
+    for i, L in enumerate(_LETTERS[:len(choices)]):
         if re.search(rf"\b{L}\b", p):
             return i
-    # OPTION X pattern
     m = re.search(r"\bOPTION\s+([A-Z])\b", p)
     if m:
-        idx = ord(m.group(1)) - ord("A")
-        if 0 <= idx < len(choices):
-            return idx
-    # Numeric index
+        i = ord(m.group(1)) - ord('A')
+        if 0 <= i < len(choices):
+            return i
     m = re.search(r"\b([0-9])\b", p)
     if m:
         idx = int(m.group(1))
         if 0 <= idx < len(choices):
             return idx
-    # Fallback: overlap with choice text
+    # fallback: overlap
     p_low = pred.lower()
     sims = []
     for i, c in enumerate(choices):
@@ -192,396 +251,347 @@ def parse_quality_pred(pred: str, choices: List[str]) -> int:
         sims.append(len(ctoks & ptoks))
     return int(np.argmax(sims)) if sims else 0
 
+# -------------------------
+# Baseline retrieval (FAISS IP + greedy budget)
+# -------------------------
+def retrieve_baseline(embs: np.ndarray, texts: List[str], q: str):
+    index = faiss.IndexFlatIP(embs.shape[1])
+    index.add(embs.astype(np.float32))
+    qv = np.array([_SBERT.create_embedding(_norm_text(q))], dtype=np.float32)
+    _, I = index.search(qv, min(BASELINE_TOP_K, len(texts)))
 
-# SBERT retrieval & clustering
-
-def baseline_retrieve_with_indices(
-    leaf_embs: np.ndarray,
-    leaf_texts: List[str],
-    question: str,
-    max_tokens: int = RETRIEVAL_BUDGET,
-    top_k: int = 50,
-) -> Tuple[int, List[int], str]:
-    """
-    SBERT baseline retrieval:
-      - FAISS inner-product index over leaf_embs
-      - greedy add under max_tokens budget
-    Returns:
-      total_tokens, indices, context_string
-    """
-    import faiss  # local import to avoid global dependency if unused
-
-    if leaf_embs.size == 0 or not leaf_texts:
-        return 0, [], ""
-
-    index = faiss.IndexFlatIP(leaf_embs.shape[1])
-    index.add(leaf_embs.astype(np.float32))
-
-    q_vec = np.array([_GLOBAL_SBERT.create_embedding(question)], dtype=np.float32)
-
-    k = min(len(leaf_texts), top_k)
-    _, I = index.search(q_vec, k)
-
-    total_tokens = 0
-    picked: List[int] = []
-    pieces: List[str] = []
-
-    for raw_idx in I[0]:
-        idx = int(raw_idx)
-        piece = leaf_texts[idx]
-        piece_tokens = len(TOK.encode(piece))
-        if total_tokens + piece_tokens > max_tokens:
+    toks, parts, idxs = 0, [], []
+    for i in I[0]:
+        t = _norm_text(texts[int(i)])
+        nt = len(TOK.encode(t))
+        if toks + nt > RETRIEVAL_BUDGET:
             break
-        total_tokens += piece_tokens
-        picked.append(idx)
-        pieces.append(piece)
+        toks += nt
+        parts.append(t)
+        idxs.append(int(i))
+    return "\n\n".join(parts), idxs
 
-    context = "\n\n".join(pieces)
-    return total_tokens, picked, context
-
-
-def cluster_leaf_embeddings_hdbscan(
-    leaf_embs: np.ndarray,
-    min_cluster_size: int = 2,
-    min_samples: int = 1,
-) -> np.ndarray:
-    """
-    Run HDBSCAN on SBERT embeddings.
-    Returns: labels (shape: [n_leaves]).
-      - noise points get label -1; we map each such point to its own singleton cluster.
-    """
-    if leaf_embs.shape[0] == 0:
+# -------------------------
+# Post-hoc clustering (HDBSCAN only)
+# -------------------------
+def cluster_hdbscan(embs: np.ndarray) -> np.ndarray:
+    if embs.shape[0] == 0:
         return np.array([], dtype=int)
-    if leaf_embs.shape[0] == 1:
+    if embs.shape[0] == 1:
         return np.array([0], dtype=int)
 
-    # Normalize for cosine-ish behavior
-    norms = np.linalg.norm(leaf_embs, axis=1, keepdims=True) + 1e-8
-    X = leaf_embs / norms
+    X = embs / (np.linalg.norm(embs, axis=1, keepdims=True) + 1e-8)
+    labels = hdbscan.HDBSCAN(
+        min_cluster_size=2,
+        min_samples=1,
+        metric="euclidean"
+    ).fit_predict(X)
 
-    clusterer = hdbscan.HDBSCAN(
-        min_cluster_size=min_cluster_size,
-        min_samples=min_samples,
-        metric="euclidean",
-    )
-    labels = clusterer.fit_predict(X)
+    # Map noise to singleton clusters
+    labels = labels.astype(int)
+    next_id = labels.max() + 1 if labels.size else 0
+    for i, l in enumerate(labels):
+        if l == -1:
+            labels[i] = next_id
+            next_id += 1
+    return labels.astype(int)
 
-    # Map noise (-1) to unique cluster ids
-    next_cluster = labels.max() + 1 if labels.size > 0 else 0
-    labels_mapped = labels.copy()
-    for i, lab in enumerate(labels):
-        if lab == -1:
-            labels_mapped[i] = next_cluster
-            next_cluster += 1
+# -------------------------
+# NEW: summarizer safety helpers
+# -------------------------
+def clip_for_summarizer(text: str, max_tokens: int = SUMMARIZER_MAX_INPUT_TOKENS) -> str:
+    ids = TOK.encode(text)
+    if len(ids) <= max_tokens:
+        return text
+    return TOK.decode(ids[:max_tokens])
 
-    return labels_mapped.astype(int)
+def safe_summarize(summarizer, text: str, max_tokens: int) -> str | None:
+    try:
+        out = summarizer.summarize(text, max_tokens=max_tokens)
+        if isinstance(out, str) and out.strip():
+            return out
+        return None
+    except Exception as e:
+        logging.warning(f"Summarization failed (skipping): {type(e).__name__}: {e}")
+        return None
 
+# -------------------------
+# doc key helper (stable across datasets)
+# -------------------------
+def get_doc_key(dataset: str, ex: Dict, doc_text: str) -> str:
+    if dataset == "narrativeqa":
+        return ex.get("document_id") or _sha1(doc_text)
+    if dataset == "quality":
+        return ex.get("article_id") or _sha1(doc_text)
+    if dataset == "qasper":
+        return str(ex.get("paper_id") or ex.get("document_id") or _sha1(doc_text))
+    raise ValueError(dataset)
 
-def build_clusters_and_summaries_for_doc(
-    leaf_texts: List[str],
-    leaf_embs: np.ndarray,
-    summarizer: GPT3TurboSummarizationModel,
-    summary_max_tokens: int = 100,
-) -> Tuple[np.ndarray, Dict[int, str]]:
-    """
-    For a single document:
-      - cluster leaf embeddings
-      - summarize each cluster once
-    Returns:
-      cluster_labels: array shape (n_leaves,)
-      cluster_summaries: dict cluster_id -> summary text
-    """
-    if not leaf_texts:
-        return np.array([], dtype=int), {}
-
-    labels = cluster_leaf_embeddings_hdbscan(leaf_embs)
-    cluster_summaries: Dict[int, str] = {}
-
-    # indices per cluster
-    clusters: Dict[int, List[int]] = defaultdict(list)
-    for i, lab in enumerate(labels):
-        clusters[int(lab)].append(i)
-
-    logging.info(f"  Found {len(clusters)} clusters for doc (incl. singletons).")
-
-    for cid, idxs in clusters.items():
-        # Concatenate texts in this cluster
-        cluster_text_parts = [leaf_texts[i] for i in idxs]
-        cluster_text = "\n\n".join(cluster_text_parts)
-        summary = summarizer.summarize(cluster_text, max_tokens=summary_max_tokens)
-        cluster_summaries[cid] = summary
-
-    return labels, cluster_summaries
-
-
-# Main experiment logic
-
+# -------------------------
+# Main
+# -------------------------
 def main():
     ap = argparse.ArgumentParser()
-    ap.add_argument(
-        "--dataset",
-        choices=["narrativeqa", "quality", "qasper"],
-        required=True,
-    )
-    ap.add_argument(
-        "--split",
-        required=True,
-        help="Path to eval JSONL (e.g. .../eval_val.jsonl or sub50_q5).",
-    )
-    ap.add_argument(
-        "--seed",
-        type=int,
-        default=224,
-        help="Random seed (used only for reproducibility in downstream tweaks).",
-    )
-    ap.add_argument(
-        "--out",
-        required=True,
-        help="Output JSON file for metrics.",
-    )
-    ap.add_argument(
-        "--summary-max-tokens",
-        type=int,
-        default=100,  # matches TreeBuilder summarization_length in your main RAPTOR runs
-        help="Max tokens for each cluster summary (should match TreeBuilder summarization_length).",
-    )
+    ap.add_argument("--dataset", required=True, choices=["narrativeqa", "quality", "qasper"])
+    ap.add_argument("--split", required=True)
+    ap.add_argument("--out", required=True)
+    ap.add_argument("--seed", type=int, default=DEFAULT_SEED,
+                    help="Random seed (reproducibility for HDBSCAN + summarization)")
+    ap.add_argument("--cluster-top-k", type=int, default=CLUSTER_TOP_K)
+    ap.add_argument("--summary-max-tokens", type=int, default=SUMMARY_MAX_TOKENS)
+    ap.add_argument("--summarizer-max-input-tokens", type=int, default=SUMMARIZER_MAX_INPUT_TOKENS)
     args = ap.parse_args()
 
-    dataset = args.dataset
-    split_path = Path(args.split)
-    out_path = Path(args.out)
-    out_path.parent.mkdir(parents=True, exist_ok=True)
+    summarizer_max_input_tokens = int(args.summarizer_max_input_tokens)
 
-    logging.info(f"Loading split: {split_path} (dataset={dataset})")
-    data = load_jsonl(split_path)
 
-    # Group example indices by doc_key
-    docs_to_indices: Dict[str, List[int]] = defaultdict(list)
-    doc_texts: Dict[str, str] = {}
-    for i, ex in enumerate(data):
-        doc_text = _norm_text(ex["doc_text"])
-        doc_key = get_doc_key(dataset, ex, doc_text)
-        docs_to_indices[doc_key].append(i)
-        if doc_key not in doc_texts:
-            doc_texts[doc_key] = doc_text
+    set_global_seed(args.seed)
 
-    logging.info(f"Found {len(docs_to_indices)} unique documents in split.")
-
-    # Prepare models
+    data = load_jsonl(Path(args.split))
     qa = UnifiedQAModel(UQA_MODEL_NAME)
-    summarizer = GPT3TurboSummarizationModel(model="gpt-3.5-turbo")
+    summarizer = GPT3TurboSummarizationModel("gpt-3.5-turbo")
 
-    # Precompute per-doc chunks, embeddings, clusters, summaries
+    # Group by document (avoid recomputing clusters/summaries)
+    doc_texts: Dict[str, str] = {}
+    for ex in data:
+        doc = _norm_text(ex["doc_text"])
+        dk = get_doc_key(args.dataset, ex, doc)
+        doc_texts.setdefault(dk, doc)
+
+    # Precompute chunks + embeddings + HDBSCAN + summaries per doc
     doc_chunks: Dict[str, List[str]] = {}
     doc_embs: Dict[str, np.ndarray] = {}
-    doc_cluster_labels: Dict[str, np.ndarray] = {}
-    doc_cluster_summaries: Dict[str, Dict[int, str]] = {}
+    doc_labels: Dict[str, np.ndarray] = {}
+    doc_summaries: Dict[str, Dict[int, str]] = {}
 
-    for di, (doc_key, idxs) in enumerate(docs_to_indices.items(), start=1):
-        doc_text = doc_texts[doc_key]
-        # Leaf chunks as in your tree-building: 100-token chunks with cl100k_base
-        chunks = split_text(doc_text, TOK, LEAF_CHUNK_TOKENS)
+    for dk, doc in tqdm(doc_texts.items(), desc="Precompute docs"):
+        chunks = split_text(doc, TOK, LEAF_CHUNK_TOKENS)
         if not chunks:
-            logging.warning(f"[doc {doc_key}] has no chunks, skipping.")
             continue
 
-        # SBERT embeddings for leaves
-        embs = np.array(
-            [_GLOBAL_SBERT.create_embedding(ch) for ch in chunks],
-            dtype=np.float32,
-        )
+        embs = np.array([_SBERT.create_embedding(_norm_text(c)) for c in chunks], dtype=np.float32)
+        labels = cluster_hdbscan(embs)
 
-        # Clusters + summaries
-        logging.info(
-            f"[{di}/{len(docs_to_indices)}] Building clusters & summaries for doc_key={doc_key} "
-            f"(n_chunks={len(chunks)})"
-        )
-        labels, summaries = build_clusters_and_summaries_for_doc(
-            chunks,
-            embs,
-            summarizer=summarizer,
-            summary_max_tokens=args.summary_max_tokens,
-        )
+        summaries: Dict[int, str] = {}
+        for cid in sorted(set(labels.tolist())):
+            idxs = np.where(labels == cid)[0]
+            if len(idxs) <= 1:
+                continue  # NO singleton summaries
 
-        doc_chunks[doc_key] = chunks
-        doc_embs[doc_key] = embs
-        doc_cluster_labels[doc_key] = labels
-        doc_cluster_summaries[doc_key] = summaries
+            text = "\n\n".join(chunks[i] for i in idxs)
+            text = clip_for_summarizer(text, max_tokens=summarizer_max_input_tokens)
 
-    # ------------------------------------------------------------------
-    # Run QA for baseline vs post-hoc per example
-    # ------------------------------------------------------------------
+            summ = safe_summarize(summarizer, text, max_tokens=int(args.summary_max_tokens))
+            if summ:
+                summaries[int(cid)] = summ
 
-    # Metric accumulators
-    # NarrativeQA
-    base_bleu1, base_bleu4, base_rougeL, base_meteor = [], [], [], []
-    ph_bleu1, ph_bleu4, ph_rougeL, ph_meteor = [], [], [], []
+        doc_chunks[dk] = chunks
+        doc_embs[dk] = embs
+        doc_labels[dk] = labels
+        doc_summaries[dk] = summaries
 
-    # QuALITY
-    base_acc, ph_acc = [], []
+    # Accumulators (match RAPTOR metrics)
+    if args.dataset == "narrativeqa":
+        base = {"bleu1": [], "bleu4": [], "rougeL": [], "meteor": []}
+        post = {"bleu1": [], "bleu4": [], "rougeL": [], "meteor": []}
+        empties_base = 0
+        empties_post = 0
 
-    # QASPER
-    base_f1, ph_f1 = [], []
+    elif args.dataset == "quality":
+        base_correct = 0
+        post_correct = 0
+        n_used = 0
 
-    n_examples_used = 0
+    else:  # qasper
+        base_f1s: List[float] = []
+        post_f1s: List[float] = []
+        empties_base = 0
+        empties_post = 0
 
-    for ex_idx, ex in enumerate(data):
-        doc_text = _norm_text(ex["doc_text"])
-        question = _norm_text(ex["question"])
-        doc_key = get_doc_key(dataset, ex, doc_text)
+    # Per-example loop
+    for ex in tqdm(data, desc=f"Eval {args.dataset}"):
+        doc = _norm_text(ex["doc_text"])
+        q = _norm_text(ex["question"])
+        dk = get_doc_key(args.dataset, ex, doc)
 
-        if doc_key not in doc_chunks:
-            logging.warning(f"[ex {ex_idx}] No chunks for doc_key={doc_key}, skipping.")
+        if dk not in doc_chunks:
             continue
 
-        leaf_texts = doc_chunks[doc_key]
-        leaf_embs = doc_embs[doc_key]
-        labels = doc_cluster_labels[doc_key]
-        summaries = doc_cluster_summaries[doc_key]
-
-        # Build the retrieval question (for QuALITY we use Q+options)
-        if dataset == "quality":
+        # Dataset-specific retrieval question
+        if args.dataset == "quality":
             choices = [_norm_text(c) for c in (ex.get("choices", []) or [])]
-            if not choices:
-                logging.warning(f"[ex {ex_idx}] No choices in QuALITY, skipping.")
+            gold_idx = ex.get("gold_idx", ex.get("correct_idx"))
+            if gold_idx is None or not choices:
                 continue
-            q_for_retrieval = quality_prompt(question, choices)
+            q_for_retrieval = _quality_prompt(q, choices)
         else:
-            q_for_retrieval = question
+            q_for_retrieval = q
 
-        # 1) SBERT baseline retrieval
-        _, baseline_indices, baseline_ctx = baseline_retrieve_with_indices(
-            leaf_embs,
-            leaf_texts,
-            q_for_retrieval,
-            max_tokens=RETRIEVAL_BUDGET,
-            top_k=50,
-        )
-
-        if not baseline_indices:
-            logging.warning(f"[ex {ex_idx}] Baseline retrieved nothing, skipping.")
+        # 1) baseline retrieval
+        base_ctx, idxs = retrieve_baseline(doc_embs[dk], doc_chunks[dk], q_for_retrieval)
+        if not idxs:
             continue
 
-        # 2) Post-hoc context = summaries of cluster(s) + baseline leaves
-        used_clusters = sorted({int(labels[i]) for i in baseline_indices})
-        cluster_ctx_parts = [summaries[cid] for cid in used_clusters if cid in summaries]
+        # 2) clusters touched by baseline -> rank by query similarity -> take summaries
+        used_clusters = sorted(set(int(doc_labels[dk][i]) for i in idxs))
 
-        # *** KEY CHANGE: prepend summaries, then leaf chunks ***
-        if cluster_ctx_parts:
-            posthoc_ctx = "\n\n".join(cluster_ctx_parts + [baseline_ctx])
-        else:
-            posthoc_ctx = baseline_ctx
+        qv = _SBERT.create_embedding(_norm_text(q_for_retrieval)).astype(np.float32)
+        scored = []
+        for cid in used_clusters:
+            if cid not in doc_summaries[dk]:
+                continue
+            members = np.where(doc_labels[dk] == cid)[0]
+            score = float(np.max(doc_embs[dk][members] @ qv))
+            scored.append((score, cid))
 
-        # ------------------------------------------------------------------
-        # Dataset-specific QA & scoring
-        # ------------------------------------------------------------------
+        scored.sort(reverse=True)
+        top_summaries_raw = [doc_summaries[dk][cid] for _, cid in scored[:int(args.cluster_top_k)]]
+        top_summaries = [s for s in top_summaries_raw if isinstance(s, str) and s.strip()]
 
-        if dataset == "narrativeqa":
+        post_ctx = "\n\n".join(top_summaries + [base_ctx]) if top_summaries else base_ctx
+
+        # 3) Run UnifiedQA with the SAME clipping logic as RAPTOR eval
+        if args.dataset == "narrativeqa":
             refs = [_norm_text(r) for r in (ex.get("gold_answers", []) or [])]
             if not refs:
                 continue
 
-            # Baseline
-            q_trim, c_trim = clip_for_unifiedqa(question, baseline_ctx, budget=UQA_MAX_LEN)
-            pred_base = qa.answer_question(c_trim, q_trim)
+            q_b, c_b = clip_for_unifiedqa(q, base_ctx, budget=UQA_MAX_LEN)
+            pred_b = qa.answer_question(c_b, q_b)
+            if not pred_b.strip():
+                empties_base += 1
 
-            # Post-hoc
-            q_trim_ph, c_trim_ph = clip_for_unifiedqa(question, posthoc_ctx, budget=UQA_MAX_LEN)
-            pred_ph = qa.answer_question(c_trim_ph, q_trim_ph)
+            q_p, c_p = clip_for_unifiedqa(q, post_ctx, budget=UQA_MAX_LEN)
+            pred_p = qa.answer_question(c_p, q_p)
+            if not pred_p.strip():
+                empties_post += 1
 
-            base_bleu1.append(bleu1(refs, pred_base))
-            base_bleu4.append(bleu4_equal(refs, pred_base))
-            base_rougeL.append(rougeL(refs, pred_base))
-            base_meteor.append(meteor_tokenized(refs, pred_base))
+            base["bleu1"].append(bleu1(refs, pred_b))
+            base["bleu4"].append(bleu4_equal(refs, pred_b))
+            base["rougeL"].append(rougeL(refs, pred_b))
+            base["meteor"].append(meteor_tokenized(refs, pred_b))
 
-            ph_bleu1.append(bleu1(refs, pred_ph))
-            ph_bleu4.append(bleu4_equal(refs, pred_ph))
-            ph_rougeL.append(rougeL(refs, pred_ph))
-            ph_meteor.append(meteor_tokenized(refs, pred_ph))
+            post["bleu1"].append(bleu1(refs, pred_p))
+            post["bleu4"].append(bleu4_equal(refs, pred_p))
+            post["rougeL"].append(rougeL(refs, pred_p))
+            post["meteor"].append(meteor_tokenized(refs, pred_p))
 
-        elif dataset == "quality":
+        elif args.dataset == "quality":
             choices = [_norm_text(c) for c in (ex.get("choices", []) or [])]
             gold_idx = ex.get("gold_idx", ex.get("correct_idx"))
             if gold_idx is None or not choices:
                 continue
 
-            q_with_opts = quality_prompt(question, choices)
+            q_trim_b, c_trim_b = clip_for_unifiedqa(q_for_retrieval, base_ctx, budget=UQA_MAX_LEN)
+            pred_b = qa.answer_question(c_trim_b, q_trim_b)
+            guess_b = _parse_quality_pred(pred_b, choices)
 
-            # Baseline
-            q_trim, c_trim = clip_for_unifiedqa(q_with_opts, baseline_ctx, budget=UQA_MAX_LEN)
-            pred_base = qa.answer_question(c_trim, q_trim)
-            guess_base = parse_quality_pred(pred_base, choices)
-            base_acc.append(100.0 * float(int(guess_base) == int(gold_idx)))
+            q_trim_p, c_trim_p = clip_for_unifiedqa(q_for_retrieval, post_ctx, budget=UQA_MAX_LEN)
+            pred_p = qa.answer_question(c_trim_p, q_trim_p)
+            guess_p = _parse_quality_pred(pred_p, choices)
 
-            # Post-hoc
-            q_trim_ph, c_trim_ph = clip_for_unifiedqa(q_with_opts, posthoc_ctx, budget=UQA_MAX_LEN)
-            pred_ph = qa.answer_question(c_trim_ph, q_trim_ph)
-            guess_ph = parse_quality_pred(pred_ph, choices)
-            ph_acc.append(100.0 * float(int(guess_ph) == int(gold_idx)))
+            base_correct += int(int(guess_b) == int(gold_idx))
+            post_correct += int(int(guess_p) == int(gold_idx))
+            n_used += 1
 
-        elif dataset == "qasper":
+        else:  # qasper
             refs = [_norm_text(r) for r in (ex.get("gold_answers", []) or [])]
             if not refs:
                 continue
 
-            # Baseline
-            q_trim, c_trim = clip_for_unifiedqa(question, baseline_ctx, budget=UQA_MAX_LEN)
-            pred_base = qa.answer_question(c_trim, q_trim)
-            base_f1.append(f1_answer(pred_base, refs) * 100.0)
+            q_b, c_b = clip_for_unifiedqa(q, base_ctx, budget=UQA_MAX_LEN)
+            pred_b = qa.answer_question(c_b, q_b)
+            if not pred_b.strip():
+                empties_base += 1
+            base_f1s.append(f1_answer(pred_b, refs))
 
-            # Post-hoc
-            q_trim_ph, c_trim_ph = clip_for_unifiedqa(question, posthoc_ctx, budget=UQA_MAX_LEN)
-            pred_ph = qa.answer_question(c_trim_ph, q_trim_ph)
-            ph_f1.append(f1_answer(pred_ph, refs) * 100.0)
+            q_p, c_p = clip_for_unifiedqa(q, post_ctx, budget=UQA_MAX_LEN)
+            pred_p = qa.answer_question(c_p, q_p)
+            if not pred_p.strip():
+                empties_post += 1
+            post_f1s.append(f1_answer(pred_p, refs))
 
-        else:
-            raise ValueError(f"Unsupported dataset: {dataset}")
-
-        n_examples_used += 1
-        if n_examples_used % 10 == 0:
-            logging.info(f"Processed {n_examples_used} examples so far.")
-
-    # ------------------------------------------------------------------
-    # Aggregate metrics
-    # ------------------------------------------------------------------
-
-    def mean_safe(xs: List[float]) -> float:
-        return float(np.mean(xs)) if xs else 0.0
-
-    result: Dict[str, object] = {
-        "dataset": dataset,
-        "split": str(split_path),
-        "n_examples_used": n_examples_used,
-    }
-
-    if dataset == "narrativeqa":
-        result["baseline"] = {
-            "bleu1": mean_safe(base_bleu1),
-            "bleu4": mean_safe(base_bleu4),
-            "rougeL": mean_safe(base_rougeL),
-            "meteor": mean_safe(base_meteor),
+    # Aggregate + write output (table-friendly)
+    if args.dataset == "narrativeqa":
+        result = {
+            "timestamp": int(time.time()),
+            "dataset": args.dataset,
+            "split": str(Path(args.split)),
+            "seed": int(args.seed),
+            "retrieval_budget": RETRIEVAL_BUDGET,
+            "uqa_context_budget": UQA_CONTEXT_BUDGET,
+            "tb_max_tokens": LEAF_CHUNK_TOKENS,
+            "summary_max_tokens": int(args.summary_max_tokens),
+            "cluster_top_k": int(args.cluster_top_k),
+            "summarizer_max_input_tokens": int(summarizer_max_input_tokens),
+            "metrics": {
+                "baseline": {
+                    "bleu1": float(np.mean(base["bleu1"]) if base["bleu1"] else 0.0),
+                    "bleu4": float(np.mean(base["bleu4"]) if base["bleu4"] else 0.0),
+                    "rougeL": float(np.mean(base["rougeL"]) if base["rougeL"] else 0.0),
+                    "meteor": float(np.mean(base["meteor"]) if base["meteor"] else 0.0),
+                    "empty_preds": int(empties_base),
+                    "n": int(len(base["bleu1"])),
+                },
+                "posthoc_cluster": {
+                    "bleu1": float(np.mean(post["bleu1"]) if post["bleu1"] else 0.0),
+                    "bleu4": float(np.mean(post["bleu4"]) if post["bleu4"] else 0.0),
+                    "rougeL": float(np.mean(post["rougeL"]) if post["rougeL"] else 0.0),
+                    "meteor": float(np.mean(post["meteor"]) if post["meteor"] else 0.0),
+                    "empty_preds": int(empties_post),
+                    "n": int(len(post["bleu1"])),
+                },
+            },
         }
-        result["posthoc_cluster"] = {
-            "bleu1": mean_safe(ph_bleu1),
-            "bleu4": mean_safe(ph_bleu4),
-            "rougeL": mean_safe(ph_rougeL),
-            "meteor": mean_safe(ph_meteor),
+
+    elif args.dataset == "quality":
+        acc_base = 100.0 * base_correct / max(1, n_used)
+        acc_post = 100.0 * post_correct / max(1, n_used)
+        result = {
+            "timestamp": int(time.time()),
+            "dataset": args.dataset,
+            "split": str(Path(args.split)),
+            "seed": int(args.seed),
+            "retrieval_budget": RETRIEVAL_BUDGET,
+            "uqa_context_budget": UQA_CONTEXT_BUDGET,
+            "tb_max_tokens": LEAF_CHUNK_TOKENS,
+            "summary_max_tokens": int(args.summary_max_tokens),
+            "cluster_top_k": int(args.cluster_top_k),
+            "summarizer_max_input_tokens": int(SUMMARIZER_MAX_INPUT_TOKENS),
+            "metrics": {
+                "baseline": {"accuracy": float(acc_base), "n": int(n_used)},
+                "posthoc_cluster": {"accuracy": float(acc_post), "n": int(n_used)},
+            },
         }
 
-    elif dataset == "quality":
-        result["baseline"] = {"accuracy": mean_safe(base_acc)}
-        result["posthoc_cluster"] = {"accuracy": mean_safe(ph_acc)}
+    else:  # qasper
+        result = {
+            "timestamp": int(time.time()),
+            "dataset": args.dataset,
+            "split": str(Path(args.split)),
+            "seed": int(args.seed),
+            "retrieval_budget": RETRIEVAL_BUDGET,
+            "uqa_context_budget": UQA_CONTEXT_BUDGET,
+            "tb_max_tokens": LEAF_CHUNK_TOKENS,
+            "summary_max_tokens": int(args.summary_max_tokens),
+            "cluster_top_k": int(args.cluster_top_k),
+            "summarizer_max_input_tokens": int(SUMMARIZER_MAX_INPUT_TOKENS),
+            "metrics": {
+                "baseline": {
+                    "f1": float(np.mean(base_f1s) * 100 if base_f1s else 0.0),
+                    "empty_preds": int(empties_base),
+                    "n": int(len(base_f1s)),
+                },
+                "posthoc_cluster": {
+                    "f1": float(np.mean(post_f1s) * 100 if post_f1s else 0.0),
+                    "empty_preds": int(empties_post),
+                    "n": int(len(post_f1s)),
+                },
+            },
+        }
 
-    elif dataset == "qasper":
-        result["baseline"] = {"f1": mean_safe(base_f1)}
-        result["posthoc_cluster"] = {"f1": mean_safe(ph_f1)}
-
-    with out_path.open("w", encoding="utf-8") as f:
-        json.dump(result, f, indent=2)
-
-    logging.info(f"Wrote post-hoc cluster baseline results to {out_path}")
+    Path(args.out).write_text(json.dumps(result, indent=2), encoding="utf-8")
     logging.info(json.dumps(result, indent=2))
-
 
 if __name__ == "__main__":
     main()

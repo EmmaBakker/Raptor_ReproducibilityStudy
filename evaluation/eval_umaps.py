@@ -134,13 +134,13 @@ def clip_for_unifiedqa(question: str, context: str, budget: int | None = None) -
 def bleu1(refs: List[str], hyp: str) -> float:
     ref_tok = [word_tokenize(r) for r in refs]
     hyp_tok = word_tokenize(hyp)
-    ch = SmoothingFunction().method1
+    ch = SmoothingFunction().method3
     return sentence_bleu(ref_tok, hyp_tok, weights=(1.0, 0, 0, 0), smoothing_function=ch) * 100
 
 def bleu4_equal(refs: List[str], hyp: str) -> float:
     ref_tok = [word_tokenize(r) for r in refs]
     hyp_tok = word_tokenize(hyp)
-    ch = SmoothingFunction().method1
+    ch = SmoothingFunction().method3
     return sentence_bleu(ref_tok, hyp_tok, weights=(0.25, 0.25, 0.25, 0.25), smoothing_function=ch) * 100
 
 def rougeL(refs: List[str], hyp: str) -> float:
